@@ -729,6 +729,16 @@
     font-family: var(--font-mono);
     font-size: 0.88em;
   }
+  /* Inline SVG figures (issue #49). The sanitizer emits plain <svg>; it must “just
+     fit” the column and never be the source of a scroll, and a print must not cut
+     it in half. No rule here may introduce a fetch — there is no background image. */
+  .content .svg-block { margin: 1.15em 0; text-align: center; }
+  .content .svg-block svg {
+    max-width: 100%;
+    height: auto;
+    overflow: visible;
+    vertical-align: middle;
+  }
 </style>
 </head>
 <body class="is-empty">
@@ -1088,6 +1098,220 @@
     return { text: out.join('\n'), store: store };
   }
 
+  // ── Inline SVG (issue #49) ───────────────────────────────────────────
+  // A document may carry a vector figure as inline `<svg>` markup. The parser
+  // escapes everything and re-inserts only allowlisted constructs, so an SVG
+  // used to render as escaped text. This is *not* an HTML passthrough; it is a
+  // second allowlisted channel next to the math one, and it has its own
+  // sanitizer.
+  //
+  // The sanitizer is pure JavaScript — its own tiny XML tokenizer, no
+  // `DOMParser` — so the exact code the browser runs is the code the
+  // zero-dependency test suite exercises. A `DOMParser`-based sanitizer could
+  // only be tested in a browser.
+  //
+  // The rules mirror the math channel's intent: an element is emitted only if
+  // its name is on SVG_ELEMENTS, an attribute only if `svgAttrAllowed()` passes
+  // it, and a value only if `svgAttrValueAllowed()` finds no remote or `data:`
+  // URL in it. Anything else is dropped. On a parse failure the caller falls
+  // back to the code-block rendering, so the content is never swallowed.
+
+  // Element allowlist. Drawing primitives, paint servers and text. `image` is
+  // deliberately absent — it is a fetchable sub-resource. `script`,
+  // `foreignObject`, `style` and the SMIL animation elements are absent because
+  // they execute or fetch.
+  const SVG_ELEMENTS = [
+    'svg', 'g', 'defs', 'title', 'desc', 'path', 'rect', 'circle', 'ellipse',
+    'line', 'polyline', 'polygon', 'text', 'tspan', 'linearGradient',
+    'radialGradient', 'stop', 'clipPath', 'mask', 'marker', 'use'
+  ];
+  const SVG_ELEMENT_SET = SVG_ELEMENTS.reduce(function (o, n) { o[n.toLowerCase()] = true; return o; }, Object.create(null));
+
+  // Attributes named exactly, plus the prefixes below. No `href`/`xlink:href`
+  // here: the only tolerated form is a local `#fragment`, and that is decided in
+  // `svgAttrValueAllowed()`, so the two must be read together.
+  const SVG_ATTRS = [
+    'd', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'width', 'height', 'rx', 'ry', 'cx',
+    'cy', 'r', 'points', 'viewBox', 'transform', 'fill', 'stroke', 'opacity',
+    'stop-color', 'stop-opacity', 'color', 'display', 'text-anchor',
+    'dominant-baseline', 'id', 'class', 'role', 'use', 'marker-end',
+    'marker-start', 'marker-mid', 'href', 'xlink:href'
+  ];
+  const SVG_ATTRS_SET = SVG_ATTRS.reduce(function (o, n) { o[n.toLowerCase()] = true; return o; }, Object.create(null));
+  // Prefixes: paint (`fill-*`, `stroke-*`, `font-*`) and `aria-*`.
+  const SVG_ATTR_PREFIXES = ['fill-', 'stroke-', 'font-', 'stop-', 'aria-'];
+
+  function svgElementAllowed(name) {
+    return SVG_ELEMENT_SET[String(name).toLowerCase()] === true;
+  }
+
+  function svgAttrAllowed(name) {
+    const n = String(name).toLowerCase();
+    // every `on*` handler is denied outright
+    if (n.indexOf('on') === 0) return false;
+    if (SVG_ATTRS_SET[n]) return true;
+    for (let i = 0; i < SVG_ATTR_PREFIXES.length; i++) {
+      if (n.indexOf(SVG_ATTR_PREFIXES[i]) === 0) return true;
+    }
+    return false;
+  }
+
+  // A value is refused if it carries any URL that is not a bare `#fragment`.
+  // This catches `fill="url(http://…)"`, `href="http://…"`, `data:` payloads
+  // and `javascript:` — wherever the URL sits in the value.
+  function svgAttrValueAllowed(attr, value) {
+    const v = String(value);
+    if (/javascript:/i.test(v)) return false;
+    const urls = v.match(/url\(\s*(['"]?)([^'")]*)\1\s*\)/gi) || [];
+    for (let i = 0; i < urls.length; i++) {
+      const inner = urls[i].replace(/^url\(\s*['"]?/i, '').replace(/['"]?\s*\)$/, '').trim();
+      if (!/^#/.test(inner)) return false;
+    }
+    const hasScheme = /(^|[\s(,:="'])([a-z][a-z0-9+.-]*):/i.test(v);
+    if (hasScheme && !/^#/.test(v.trim())) return false;
+    if (/data:/i.test(v)) return false;
+    return true;
+  }
+
+  // Escape a text node / attribute value for the emitted markup.
+  function svgEscape(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // A minimal XML tokenizer + serializer. Returns sanitized markup, or `null`
+  // when the source is not well-formed enough to sanitize (the caller then uses
+  // the code-block fallback).
+  function sanitizeSvg(src) {
+    const s = String(src);
+    let i = 0;
+    const stack = []; // { name, raw, emitted }
+    const out = [];
+    let sawSvg = false;
+    let depth = 0;
+
+    function fail() { return null; }
+
+    while (i < s.length) {
+      const lt = s.indexOf('<', i);
+      if (lt < 0) {
+        // trailing text: keep it only inside a group we are emitting
+        if (stack.length && stack[stack.length - 1].emitted) out.push(svgEscape(s.slice(i)));
+        break;
+      }
+      if (lt > i) {
+        if (stack.length && stack[stack.length - 1].emitted) out.push(svgEscape(s.slice(i, lt)));
+        i = lt;
+      }
+      // comment
+      if (s.substr(i, 4) === '<!--') {
+        const end = s.indexOf('-->', i + 4);
+        if (end < 0) return fail();
+        i = end + 3;
+        continue;
+      }
+      // CDATA — never allowed: it can carry markup
+      if (s.substr(i, 9) === '<![CDATA[') return fail();
+      // declaration / doctype / processing instruction
+      if (s[i + 1] === '!' || s[i + 1] === '?') {
+        const end = s.indexOf('>', i);
+        if (end < 0) return fail();
+        i = end + 1;
+        continue;
+      }
+      // closing tag
+      if (s[i + 1] === '/') {
+        const end = s.indexOf('>', i);
+        if (end < 0) return fail();
+        const name = s.slice(i + 2, end).trim();
+        const top = stack.pop();
+        if (!top) return fail();
+        if (top.name.toLowerCase() !== name.toLowerCase()) return fail();
+        if (top.emitted) out.push('</' + top.name + '>');
+        depth--;
+        i = end + 1;
+        continue;
+      }
+      // opening tag
+      const nameMatch = s.slice(i + 1).match(/^([A-Za-z_][A-Za-z0-9_.:-]*)/);
+      if (!nameMatch) return fail();
+      const name = nameMatch[1];
+      // scan attributes up to the closing '>'
+      let j = i + 1 + name.length;
+      const attrs = [];
+      let selfClose = false;
+      let closed = false;
+      while (j < s.length) {
+        const c = s[j];
+        if (c === '>') { closed = true; j++; break; }
+        if (c === '/' && s[j + 1] === '>') { selfClose = true; closed = true; j += 2; break; }
+        if (/\s/.test(c)) { j++; continue; }
+        const am = s.slice(j).match(/^([A-Za-z_][A-Za-z0-9_.:-]*)/);
+        if (!am) return fail();
+        const aname = am[1];
+        j += aname.length;
+        while (/\s/.test(s[j])) j++;
+        let aval = '';
+        if (s[j] === '=') {
+          j++;
+          while (/\s/.test(s[j])) j++;
+          const q = s[j];
+          if (q === '"' || q === "'") {
+            const endq = s.indexOf(q, j + 1);
+            if (endq < 0) return fail();
+            aval = s.slice(j + 1, endq);
+            j = endq + 1;
+          } else {
+            const vm = s.slice(j).match(/^[^\s>]+/);
+            aval = vm ? vm[0] : '';
+            j += aval.length;
+          }
+        }
+        attrs.push({ name: aname, value: aval });
+      }
+      if (!closed) return fail();
+      if (name.toLowerCase() === 'svg') sawSvg = true;
+      const parentEmitted = stack.length ? stack[stack.length - 1].emitted : false;
+      const allowed = svgElementAllowed(name);
+      // The root must be <svg>; anything before it that is not <svg> is a failure
+      // only if we have not started. Nested disallowed elements are dropped with
+      // their whole subtree (emitted=false) rather than their text leaking out.
+      let emitted = allowed && (depth === 0 ? name.toLowerCase() === 'svg' : parentEmitted);
+      if (depth === 0 && !allowed) return fail();
+      if (emitted) {
+        let tag = '<' + name;
+        for (let k = 0; k < attrs.length; k++) {
+          const a = attrs[k];
+          if (!svgAttrAllowed(a.name)) continue;
+          if (!svgAttrValueAllowed(a.name, a.value)) continue;
+          tag += ' ' + a.name + '="' + svgEscape(a.value) + '"';
+        }
+        tag += selfClose ? '/>' : '>';
+        out.push(tag);
+      }
+      if (!selfClose) {
+        stack.push({ name: name, emitted: emitted });
+        depth++;
+      } else if (depth === 0) {
+        // a self-closing root <svg/> — nothing more to do
+        i = j;
+        break;
+      }
+      i = j;
+    }
+
+    if (stack.length) return fail(); // unclosed element
+    if (!sawSvg) return fail();
+    return out.join('');
+  }
+
+  // The reader's own `<svg>` sanitization entry point for a fenced/inline block:
+  // returns the sanitized markup, or `null` to tell the caller to fall back.
+  function svgBlockHtml(src) {
+    const clean = sanitizeSvg(src);
+    if (clean == null) return null;
+    return clean;
+  }
+
   function restoreMathHtml(html, store) {
     return html.replace(/\uE000(\d+)\uE001/g, function (_, i) {
       const item = store[Number(i)];
@@ -1199,6 +1423,21 @@
     // so an unclosed fence cannot silently drop the rest of the document.
     function flushCode() {
       if (!inCode) return;
+      // A ```svg fence is the explicit entry point for the inline-SVG channel
+      // (issue #49). The body goes through the same sanitizer as a pasted
+      // top-level <svg> block; a body the sanitizer cannot read falls back to
+      // the ordinary code block below, so the content is never swallowed.
+      if (/^svg$/i.test(codeLang)) {
+        const clean = svgBlockHtml(codeLines.join('\n'));
+        if (clean != null) {
+          html.push('<div class="svg-block">' + clean + '</div>');
+          inCode = false;
+          codeLang = '';
+          codeFence = '';
+          codeLines = [];
+          return;
+        }
+      }
       const langClass = codeLang ? ' class="language-' + escapeHtml(codeLang) + '"' : '';
       html.push(
         '<pre><code' + langClass + '>' +
@@ -1429,6 +1668,40 @@
           '<pre><code>' + escapeHtml(buf.join('\n')) +
           '</code><button class="copy-btn" type="button" data-copy>复制 / Copy</button></pre>'
         );
+        continue;
+      }
+
+      // top-level inline <svg> block (issue #49): the form people paste.
+      // Collected to the matching </svg> and handed to the same sanitizer as a
+      // ```svg fence. A block the sanitizer cannot read falls through to the
+      // ordinary paragraph rule, where it renders as text exactly as before.
+      if (/^\s{0,3}<svg[\s>]/i.test(line)) {
+        const buf = [];
+        let k = i;
+        while (k < lines.length) {
+          buf.push(lines[k]);
+          if (/<\/svg\s*>/i.test(lines[k])) { k++; break; }
+          // a self-closing root <svg/> on one line is complete on its own
+          if (k === i && /<svg[^>]*\/>\s*$/i.test(lines[k])) { k++; break; }
+          k++;
+        }
+        const body = buf.join('\n');
+        const clean = svgBlockHtml(body);
+        flushPara();
+        flushList();
+        flushBlockquote();
+        flushTable();
+        if (clean != null) {
+          html.push('<div class="svg-block">' + clean + '</div>');
+        } else {
+          // Not readable as SVG: keep the current code-block rendering so the
+          // content is never swallowed (issue #49).
+          html.push(
+            '<pre><code>' + escapeHtml(body) +
+            '</code><button class="copy-btn" type="button" data-copy>复制 / Copy</button></pre>'
+          );
+        }
+        i = k;
         continue;
       }
 

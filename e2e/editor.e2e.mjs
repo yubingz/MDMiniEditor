@@ -426,3 +426,51 @@ test('launcher flow: Ctrl+S writes back through the writer to the opened file', 
   assert.ok(heldInEditor.includes('SAVED VIA WRITER'), 'sanity: the edit is really in the editor');
   await writer.close();
 });
+
+// ════════════════════════════════════════════════════════════════════════
+// 6. Inline SVG (issue #49): both the fenced form and the pasted top-level
+//    form really render as a picture in a browser, with a non-zero box.
+//    The sanitizer itself is unit-tested in test/svg.test.mjs; this proves the
+//    markup survives the real HTML pipeline and gets laid out.
+// ════════════════════════════════════════════════════════════════════════
+test('an inline SVG renders as a laid-out picture, not as text', OPTS, async () => {
+  const SVG_DOC = [
+    '# SVG sample',
+    '',
+    'Fenced:',
+    '',
+    '```svg',
+    '<svg viewBox="0 0 120 60" width="120"><circle cx="60" cy="30" r="20" fill="red"/></svg>',
+    '```',
+    '',
+    'Pasted:',
+    '',
+    '<svg viewBox="0 0 120 60" width="120"><rect x="2" y="2" width="116" height="56" fill="blue"/></svg>',
+    '',
+  ].join('\n');
+  await writeFile(join(siteDir, 'svg.md'), SVG_DOC, 'utf8');
+
+  ctx = await launch(join(work, 'profile-6'));
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => assert.fail(`page error: ${e.message}`));
+  await page.goto(`${origin}/md-editor.html`);
+  await page.setInputFiles('#fileInput', join(siteDir, 'svg.md'));
+  await page.waitForFunction(() => document.querySelectorAll('#content svg').length >= 2,
+    null, { timeout: 10000 });
+
+  const boxes = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('#content svg')).map((s) => {
+      const r = s.getBoundingClientRect();
+      return { w: r.width, h: r.height, circles: s.querySelectorAll('circle').length,
+        rects: s.querySelectorAll('rect').length };
+    }));
+  assert.equal(boxes.length, 2, 'both the fenced and the pasted SVG must render');
+  for (const b of boxes) {
+    assert.ok(b.w > 0 && b.h > 0, `every SVG must have a non-zero box, got ${JSON.stringify(b)}`);
+  }
+  assert.equal(boxes[0].circles, 1, 'the fenced SVG keeps its circle');
+  assert.equal(boxes[1].rects, 1, 'the pasted SVG keeps its rect');
+  // The figure must not be text: the escaped form would have no <svg> element.
+  const content = await page.innerHTML('#content');
+  assert.ok(!content.includes('&lt;svg'), 'the SVG must not render as escaped text');
+});

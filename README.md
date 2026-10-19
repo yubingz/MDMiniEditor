@@ -13,6 +13,7 @@ A tiny, offline Markdown reader **and editor** for Windows — one HTML file plu
 - Open and drag-and-drop `.md` files
 - GFM: headings, lists, task lists, tables, code blocks, quotes
 - Images: `![alt](fig/diagram.png)` renders, resolved relative to the document
+- Inline SVG figures: a ```svg block or a pasted `<svg>…</svg>` renders as a picture, sanitized to a fixed element/attribute allowlist
 - LaTeX math (`$inline$` / `$$display$$`) via KaTeX, with offline fallback
 - An edit pane with a live preview, switched by `预览 / 编辑 / 分栏`
 - Split view: editor and preview side by side or stacked, with a draggable divider
@@ -89,6 +90,12 @@ Display math:
 $$
 F_a=\sum_{k=1}^{K} a_k F_k
 $$
+
+Inline SVG (a fenced ```svg block, or a pasted `<svg>` block):
+
+```svg
+<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="red"/></svg>
+```
 ```
 
 ---

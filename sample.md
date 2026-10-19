@@ -47,5 +47,17 @@ def hello(name: str) -> str:
     return f"Hello, {name}! / 你好，{name}！"
 ```
 
+## Inline SVG / 内联 SVG
+
+A fenced ```` ```svg ```` block renders as a figure / ```` ```svg ```` 代码块会渲染成图形:
+
+```svg
+<svg viewBox="0 0 120 60" width="240"><rect x="4" y="4" width="112" height="52" rx="6" fill="#eef"/><circle cx="60" cy="30" r="16" fill="#58f"/></svg>
+```
+
+The same figure pasted as a top-level `<svg>` block renders identically / 直接粘贴顶层 `<svg>` 块效果相同:
+
+<svg viewBox="0 0 120 60" width="240"><rect x="4" y="4" width="112" height="52" rx="6" fill="#efe"/><polygon points="60,10 100,50 20,50" fill="#3a5"/></svg>
+
 > Tip / 提示: `$` inside code blocks is not treated as math.  
 > 代码块中的 `$` 不会被当作公式。

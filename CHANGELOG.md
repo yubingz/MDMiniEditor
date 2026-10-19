@@ -27,6 +27,7 @@
 - A line holding two prices no longer loses its middle: `税费 $5.50 和 $6.00 元` used to render as `税费 <math>6.00 元` because the first `$` paired with the second
 
 ### Added
+- Inline SVG figures render as pictures. A fenced ` ```svg ` block or a top-level pasted `<svg>…</svg>` block used to show as escaped text (the parser escapes everything); both now go through one sanitizer — a fixed element and attribute allowlist, no `script`, `foreignObject`, `style`, `on*` handler, remote `href` or `url(…)` paint, and no fetchable sub-resource, so the offline guarantee is unchanged. A block the sanitizer cannot read falls back to a normal code block with the content kept (#49)
 - Formulas render with no network access: the launcher inlines a bundled KaTeX 0.16.11 build (JS + CSS + fonts) into every generated reading page, so opening a document offline no longer falls back to the plain-text renderer. `node --test` treats a pruned font as an error and asserts the KaTeX script is written as its own closed tag
 - Both launchers now call `open-md.ps1`, which hands the page to the browser the user has registered for `.html` (instead of probing for Edge), converts paths through `[Uri]` (spaces, non-ASCII, `#`) and shows the real error instead of a generic "failed to build reading page"
 - `Open-Reader.bat` accepts a dragged file as well as a double-click (`-MdPath` alongside `-Pick`), and the file dialog opens in the current folder when it already holds Markdown documents
