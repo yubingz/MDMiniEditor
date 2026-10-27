@@ -105,3 +105,17 @@ test('non-vacuity: hasItem can fail', () => {
   assert.equal(hasItem(EN_FEATURES, [['zzznotpresent']]), false);
   assert.equal(hasItem(CN_FEATURES, [['不存在的词']]), false);
 });
+
+test('the English feature list names the two-way scroll sync', () => {
+  assert.ok(
+    hasItem(EN_FEATURES, [['sync'], ['scroll']]),
+    `no English item lists the scroll sync; items: ${EN_FEATURES.join(' | ')}`
+  );
+});
+
+test('the Chinese feature list names the two-way scroll sync', () => {
+  assert.ok(
+    hasItem(CN_FEATURES, [['同步']]),
+    `no Chinese item lists the scroll sync; items: ${CN_FEATURES.join(' | ')}`
+  );
+});

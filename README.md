@@ -17,6 +17,7 @@ A tiny, offline Markdown reader **and editor** for Windows — one HTML file plu
 - LaTeX math (`$inline$` / `$$display$$`) via KaTeX, with offline fallback
 - An edit pane with a live preview, switched by `预览 / 编辑 / 分栏`
 - Split view: editor and preview side by side or stacked, with a draggable divider
+- Two-way scroll sync in split view: the editor and preview follow each other, selecting source highlights the matching block, clicking a preview block jumps the editor there
 - Save-back: `Ctrl+S` overwrites the opened file — even when opened by double-clicking (the launcher's loopback writer); `Ctrl+Shift+S` (Save As) opens a file dialog
 - Table of contents
 - Dark / light theme

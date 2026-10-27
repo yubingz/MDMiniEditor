@@ -302,6 +302,14 @@
   .panes.split-h .editor-pane { border-right: 1px solid var(--border); }
   .panes.split-v .editor-pane { border-bottom: 1px solid var(--border); }
 
+  /* 编辑区选中时，预览区对应块的临时高亮 */
+  .content .sync-hit {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    box-shadow: inset 3px 0 0 var(--accent);
+    border-radius: 3px;
+    transition: background .12s ease;
+  }
+
   .splitter {
     display: none;
     background: var(--border);
@@ -825,6 +833,9 @@
 (function () {
   'use strict';
 
+  // 渲染期需要块行号标记来生成预览锚点；纯解析（测试）不需要，保持输出纯净。
+  window.__MDR_EMIT_BLOCK_MARKS__ = true;
+
   /* PARSER:BEGIN */
 
   /* ══════════════════════════════════════════
@@ -1330,6 +1341,22 @@
   function parseMarkdown(md) {
     const lines = String(md).replace(/\r\n?/g, '\n').split('\n');
     const html = [];
+    let blockStart = 0;
+    // 记录每个"顶层块"的源起始行号。不改 HTML 字符串——那样会把内层
+    // <ul>/<li> 也误加属性，破坏解析器结构测试。改为收集成数组，
+    // 渲染后按 DOM 顺序给 #content 的直接子元素打锚点。
+    // 顶层块前的行号标记。默认关闭：解析器的纯净输出是测试契约的一部分
+    // （结构测试断言精确 HTML），只有页面渲染时才打开，用于生成 data-line。
+    const rawPush = html.push.bind(html);
+    if (typeof window !== 'undefined' && window.__MDR_EMIT_BLOCK_MARKS__) {
+      html.push = function (chunk) {
+        if (typeof chunk === 'string'
+            && /^<(p|h[1-6]|ul|ol|pre|table|blockquote|hr|div|figure)\b/.test(chunk)) {
+          return rawPush('<!--@L' + blockStart + '-->' + chunk);
+        }
+        return rawPush(chunk);
+      };
+    }
     const toc = [];
     const headingIds = Object.create(null);
     let i = 0;
@@ -1470,6 +1497,10 @@
     while (i < lines.length) {
       const line = lines[i];
       const next = lines[i + 1] || '';
+      // 只有非空行、且不在代码块内时，才是新块的开始
+      if (!inCode && !/^\s*$/.test(line)) {
+        blockStart = i;
+      }
 
       // fenced code
       if (!inCode) {
@@ -2251,6 +2282,40 @@
     result.toc.forEach(function (t) {
       t.text = cleanTocText(t.text, guarded.store);
     });
+    // 从 DOM 里读块前的行号标记（<!--@L123-->），贴成 data-line。
+    //
+    // 为什么不按"第几个块"对位：解析器数出的块数与 DOM 子元素数可能差一两个
+    // （自闭合 <hr>、blockquote 内部再解析），一旦不等，早期版本就一个锚点都不贴，
+    // 同步整体失效（2026-10-26 实测 213 vs 211）。读标记是逐个块精确对应，不会错位。
+    (function tagBlockLines() {
+      if (!contentEl || !contentEl.childNodes) return;   // 纯测试环境无真实 DOM
+      let pending = null;
+      const nodes = contentEl.childNodes;
+      const marked = [];
+      for (let ni = 0; ni < nodes.length; ni++) {
+        const nd = nodes[ni];
+        if (nd.nodeType === 8) {                     // 注释节点
+          const m = /@L(\d+)/.exec(nd.nodeValue || '');
+          if (m) pending = m[1];
+        } else if (nd.nodeType === 1 && pending != null) {
+          nd.setAttribute('data-line', pending);
+          marked.push(nd);
+          pending = null;
+        }
+      }
+      // 每块在源码里跨多少行 = 下一块起点 - 本块起点。
+      // 最后一个块用文档总行数兜底。有了跨度，同步时能在块内按比例分摊——
+      // 一个 SVG 块源码 30 行、预览一张图，只对齐块首行会让整块内部错位。
+      for (let mi = 0; mi < marked.length; mi++) {
+        const cur = Number(marked[mi].getAttribute('data-line'));
+        const nxt = mi + 1 < marked.length
+          ? Number(marked[mi + 1].getAttribute('data-line'))
+          : null;
+        const span = nxt != null && nxt > cur ? nxt - cur : null;
+        if (span != null) marked[mi].setAttribute('data-span', String(span));
+      }
+    })();
+
     renderMath(contentEl); // safety net for any leftover $...$
     loadKatex().then(function (ok) {
       if (ok) upgradeMathWithKatex(contentEl);
@@ -2609,6 +2674,12 @@
     $('btnSaveAs').disabled = !state.hasDoc;
 
     if (mode !== 'preview') syncEditor();
+    // 进入分栏时按编辑器当前行号对齐预览，避免一打开就错位
+    if (mode === 'split') {
+      requestAnimationFrame(function () {
+        syncPreviewFromEditor();
+      });
+    }
   }
 
   function syncEditor() {
@@ -2619,22 +2690,47 @@
 
   // Paint the source: one span per highlighted token, plain text nodes in
   // between. Never innerHTML — the document is untrusted input.
+  // 编辑器行号索引缓存：每次重绘高亮层后失效，下次同步时重建。
+  let _lineIndexCache = null;
+
   function renderHighlight() {
     const segments = highlightMarkdown(state.md);
     const frag = document.createDocumentFragment();
+    // 给每行第一个片段打上源行号，供滚动同步按真实布局定位。
+    // 不能靠 scrollTop/lineHeight 估算：textarea 软换行会把 673 行铺成 1251 个屏幕行，
+    // 估算结果与源行号差近一倍（2026-10-26 实测）。
+    let srcLine = 0;
+    let atLineStart = true;
     segments.forEach(function (seg) {
-      if (seg.cls === 'text') {
-        frag.appendChild(document.createTextNode(seg.text));
-        return;
-      }
-      const span = document.createElement('span');
-      span.className = 'ts-' + seg.cls;
-      span.textContent = seg.text;
-      frag.appendChild(span);
+      const mk = function (text, cls) {
+        const node = cls === 'text'
+          ? document.createTextNode(text)
+          : (function () {
+              const s = document.createElement('span');
+              s.className = 'ts-' + cls;
+              s.textContent = text;
+              return s;
+            })();
+        if (atLineStart && text) {
+          const wrap = document.createElement('span');
+          wrap.className = 'src-line';
+          wrap.setAttribute('data-src-line', String(srcLine));
+          wrap.appendChild(node);
+          frag.appendChild(wrap);
+          // 这一行可能跨多个片段，只有第一个打标记
+          atLineStart = false;
+        } else {
+          frag.appendChild(node);
+        }
+        const n = (text.match(/\n/g) || []).length;
+        if (n) { srcLine += n; atLineStart = true; }
+      };
+      mk(seg.text, seg.cls);
     });
     // A trailing newline keeps the last line of a document that does not end
     // with one from being clipped by the pre's own box.
     frag.appendChild(document.createTextNode('\n'));
+    _lineIndexCache = null;   // 行号索引失效，下次同步时重建
     editorHlEl.textContent = '';
     editorHlEl.appendChild(frag);
   }
@@ -2679,7 +2775,349 @@
     refreshFileLabel();
   };
 
+
+  /* ── 编辑↔预览 双向同步 ──
+     两个滚动容器：编辑器 #editorScroll（内含随内容增高的 textarea），
+     预览 #contentWrap（内含 article#content）。
+     预览块带 data-line（源起始行号），用它建立两边的行号对应关系。 */
+
+  const syncState = { by: null, lockUntil: 0 };
+
+  // 预览块的行号表：[[起始行, 元素], ...]，按行号升序
+  function previewAnchors() {
+    const out = [];
+    const kids = contentEl.children;
+    for (let i = 0; i < kids.length; i++) {
+      const el = kids[i];
+      const ln = el.getAttribute && el.getAttribute('data-line');
+      if (ln != null) out.push([parseInt(ln, 10), el]);
+    }
+    out.sort(function (a, b) { return a[0] - b[0]; });
+    return out;
+  }
+
+  // 源码行号 -> 预览区的像素位置（线性插值到两个锚点之间）
+  function lineToPreviewY(line, anchors) {
+    if (!anchors.length) return 0;
+    let prev = anchors[0];
+    if (line <= prev[0]) return prev[1].offsetTop;
+    for (let i = 1; i < anchors.length; i++) {
+      const cur = anchors[i];
+      if (line <= cur[0]) {
+        const span = cur[0] - prev[0];
+        const ratio = span > 0 ? (line - prev[0]) / span : 0;
+        const y0 = prev[1].offsetTop;
+        const y1 = cur[1].offsetTop;
+        return y0 + (y1 - y0) * ratio;
+      }
+      prev = cur;
+    }
+    const last = anchors[anchors.length - 1][1];
+    return last.offsetTop + last.offsetHeight;
+  }
+
+  // 编辑器滚动位置 -> 对应的源码行号。
+  //
+  // 不能靠 scrollTop / lineHeight 估算：textarea 是 wrap="soft"，
+  // 673 行源码会铺成 1251 个屏幕行，估算结果和真实行号差近一倍（2026-10-26 实测）。
+  //
+  // 改为查 DOM：renderHighlight 给每行第一个片段包了 .src-line[data-src-line]，
+  // 这里按这些节点的真实纵坐标定位。用缓存 + 二分，长文档也不卡。
+  function buildLineIndex() {
+    const nodes = editorHlEl.querySelectorAll('.src-line');
+    const idx = [];
+    const hlTop = editorHlEl.getBoundingClientRect().top;
+    for (let i = 0; i < nodes.length; i++) {
+      idx.push([Number(nodes[i].getAttribute('data-src-line')),
+                nodes[i].getBoundingClientRect().top - hlTop]);
+    }
+    return idx;
+  }
+
+  function editorTopToLine(scrollTop) {
+    if (!_lineIndexCache) {
+      if (!editorHlEl || !editorHlEl.querySelector) return 0;
+      _lineIndexCache = buildLineIndex();
+    }
+    const idx = _lineIndexCache;
+    if (!idx.length) return 0;
+    // 二分：找"顶部位置 <= scrollTop"的最后一个行标记
+    let lo = 0, hi = idx.length - 1, best = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (idx[mid][1] <= scrollTop + 2) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    return idx[best][0];
+  }
+
+  let _lineH = 0;
+  function editorLineHeight() {
+    if (_lineH) return _lineH;
+    const cs = getComputedStyle(editorHlEl);
+    let lh = parseFloat(cs.lineHeight);
+    if (!isFinite(lh)) {
+      const fs = parseFloat(cs.fontSize) || 14;
+      lh = fs * 1.5;
+    }
+    _lineH = lh;
+    return lh;
+  }
+
+  // 元素相对滚动容器"内容顶部"的距离（可直接赋给 scrollTop）。
+  //
+  // 不能用 offsetTop：它的基准是 offsetParent，与滚动容器未必一致。
+  // 实测某文档里 offsetTop=460 的元素真实位置在 -30725（差 3 万像素）。
+  //
+  // getBoundingClientRect 两者相减得到的是"相对容器可视区顶"，加 scrollTop 才是
+  // 相对内容顶。这里的 scrollTop 必须与 rect 同一时刻读取，否则滚动中会偏。
+  function elTopIn(container, el) {
+    const cRect = container.getBoundingClientRect();
+    const eRect = el.getBoundingClientRect();
+    return eRect.top - cRect.top + container.scrollTop;
+  }
+
+  // 只保留标题级锚点（h1-h6）。
+  //
+  // 为什么不用全部块：块内"每行源码对应多少像素"差异极大——实测一个 <p> 是 85px/行，
+  // 一个 <ul> 是 134px/行，SVG 块只有 10px/行，相差十几倍。
+  // 在这样的数据上做块内线性插值必然偏（2026-10-26 实测偏差达 32 行）。
+  // 标题在两侧的对应关系稳定，用它划段、段内按比例，误差被摊平到一整节之内。
+  function headingAnchors(anchors) {
+    const out = [];
+    for (let i = 0; i < anchors.length; i++) {
+      const el = anchors[i][1];
+      if (/^H[1-6]$/.test(el.tagName)) out.push(anchors[i]);
+    }
+    return out.length >= 2 ? out : anchors;
+  }
+
+  // 源码行号 -> 覆盖它的预览块 + 块内偏移。
+  function anchorForLine(line, anchors) {
+    if (!anchors.length) return null;
+    let best = anchors[0];
+    for (let i = 0; i < anchors.length; i++) {
+      if (anchors[i][0] <= line) best = anchors[i];
+      else break;
+    }
+    const el = best[1];
+    const span = parseInt(el.getAttribute('data-span') || '', 10);
+    let frac = 0;
+    if (span && span > 0) {
+      frac = Math.max(0, Math.min(1, (line - best[0]) / span));
+    }
+    return { el, frac, startLine: best[0] };
+  }
+
+  // 编辑器 -> 预览：让"编辑器顶部那一行"出现在预览顶部。
+  // 不用整体比例映射——两侧行高不同（源码约 21px/行，预览一段可能 60px），
+  // 比例映射越往后漂得越远。每次都以顶部行为基准重新对齐。
+  function syncPreviewFromEditor() {
+    if (state.mode !== 'split') return;
+    const anchors = headingAnchors(previewAnchors());
+    if (!anchors.length) return;
+    const line = editorTopToLine(editorScrollEl.scrollTop);
+    // 按标题吸附：只对齐到"当前所在的节"，节内不插值。
+    // 文档里有 SVG 代码块时（源码几十行 → 预览一张图），节内行级对齐
+    // 在数学上就不成立，任何插值都会偏出半屏（2026-10-26 实测差 38 行）。
+    // 吸附到节，两边永远显示同一节，不会出现左右差两节的情况。
+    const a = anchorForLine(line, anchors);
+    if (!a) return;
+    contentWrapEl.scrollTop = Math.max(0, elTopIn(contentWrapEl, a.el));
+  }
+
+  // 预览 -> 编辑器：让"预览顶部那个块"对应的源码行出现在编辑器顶部。
+  // 与正向同一套锚点逻辑，保证来回滚不会越走越偏。
+  function syncEditorFromPreview() {
+    if (state.mode !== 'split') return;
+    const anchors = headingAnchors(previewAnchors());
+    if (!anchors.length) return;
+    const top = contentWrapEl.scrollTop + 2;
+
+    // 找预览顶部属于哪一节（按标题锚点吸附，理由见 syncPreviewFromEditor）
+    let idx = 0;
+    for (let i = 0; i < anchors.length; i++) {
+      if (elTopIn(contentWrapEl, anchors[i][1]) <= top) idx = i;
+      else break;
+    }
+    const startLine = anchors[idx][0];
+    editorScrollEl.scrollTop = Math.max(0, editorLineToTop(startLine));
+  }
+
+  // 源码行号 -> 编辑器内的纵坐标（相对内容顶部）
+  function editorLineToTop(line) {
+    if (!_lineIndexCache) {
+      if (!editorHlEl || !editorHlEl.querySelector) return 0;
+      _lineIndexCache = buildLineIndex();
+    }
+    const idx = _lineIndexCache;
+    if (!idx.length) return 0;
+    let lo = 0, hi = idx.length - 1, best = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (idx[mid][0] <= line) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    // 两行之间按线性折算
+    const cur = idx[best];
+    const nxt = best + 1 < idx.length ? idx[best + 1] : null;
+    if (nxt && nxt[0] > cur[0]) {
+      const f = (line - cur[0]) / (nxt[0] - cur[0]);
+      return cur[1] + (nxt[1] - cur[1]) * f;
+    }
+    return cur[1];
+  }
+
+  // 防止两边互相触发形成回环。
+  //
+  // 旧版依赖 requestAnimationFrame 解锁，只锁一帧。实测在真实浏览器里不够：
+  // 同步引起的滚动会派发新事件，而那一帧请求动画帧可能已经解锁，
+  // 于是反向同步把位置改回去，来回拉扯，越滚差越多（2026-10-26 用户实测）。
+  // 改为时间戳锁：同步后 80ms 内忽略反方向事件。
+  function guardedSync(fn, dir) {
+    const now = Date.now();
+    if (syncState.lockUntil && now < syncState.lockUntil && syncState.by !== dir) {
+      return;
+    }
+    syncState.by = dir;
+    fn();
+    syncState.lockUntil = Date.now() + 80;
+    setTimeout(function () {
+      syncState.by = null;
+    }, 80);
+  }
+
   $('editor').addEventListener('input', onEditorInput);
+
+
+  // 滚动同步。
+  // 三层监听，兼容不同内核：
+  //   1) 直接监听两个滚动容器（标准 Chromium / Edge / Chrome）
+  //   2) 捕获阶段监听 document —— 某些嵌入式内核（如 Kimi 的 Zero 浏览器）
+  //      把滚动交给外层容器，元素自身不派发 scroll，只能在捕获阶段收到
+  //   3) window 的 scroll 兜底
+  // 事件源用 ev.target 区分是哪一侧在滚，而不是假设是当前元素。
+  // 诊断：列出当前所有"真的能滚"的元素。嵌入内核滚动容器可能不是我们以为的那个。
+  // 在浏览器控制台输入 __mdrScrollDiag() 即可查看。
+  window.__mdrScrollDiag = function () {
+    const out = [];
+    const all = document.querySelectorAll('*');
+    for (let i = 0; i < all.length; i++) {
+      const el = all[i];
+      if (el.scrollHeight > el.clientHeight + 4 && el.clientHeight > 40) {
+        out.push({
+          tag: el.tagName.toLowerCase(),
+          id: el.id || '',
+          cls: (el.className || '').toString().slice(0, 30),
+          scrollH: el.scrollHeight,
+          clientH: el.clientHeight,
+          scrollTop: el.scrollTop,
+        });
+      }
+    }
+    out.push({
+      tag: 'document.scrollingElement',
+      id: (document.scrollingElement && document.scrollingElement.id) || '',
+      scrollH: document.scrollingElement ? document.scrollingElement.scrollHeight : 0,
+      clientH: document.scrollingElement ? document.scrollingElement.clientHeight : 0,
+      scrollTop: document.scrollingElement ? document.scrollingElement.scrollTop : 0,
+    });
+    return out;
+  };
+
+  function onAnyScroll(ev) {
+    const t = ev.target;
+    if (!t || t === document || t === window) {
+      // 外层容器滚动：用谁的变化更明显来判断方向
+      guardedSync(syncPreviewFromEditor, 'editor');
+      return;
+    }
+    if (t === contentWrapEl || (t.contains && t.contains(contentWrapEl))) {
+      guardedSync(syncEditorFromPreview, 'preview');
+      return;
+    }
+    if (t === editorScrollEl || (t.contains && t.contains(editorScrollEl)) ||
+        t === editorEl) {
+      guardedSync(syncPreviewFromEditor, 'editor');
+    }
+  }
+
+  // 只监听两个滚动容器本体。同一事件只能被处理一次——
+  // 之前还挂了 document 捕获和 window 兜底，同一个滚动会被同步多次，
+  // 是"越滚差越多"的放大器（2026-10-26 用户实测）。
+  editorScrollEl.addEventListener('scroll', function () {
+    guardedSync(syncPreviewFromEditor, 'editor');
+  }, { passive: true });
+  contentWrapEl.addEventListener('scroll', function () {
+    guardedSync(syncEditorFromPreview, 'preview');
+  }, { passive: true });
+
+  /* ── 选中同步 ──
+     编辑器里选中一段源码 -> 预览区高亮对应块。
+     做法：由选区起止行号找出覆盖的预览块，加 .sync-hit 高亮并滚到视野内。 */
+  function highlightPreviewForSelection() {
+    if (state.mode !== 'split') return;
+    const s = editorEl.selectionStart;
+    const e = editorEl.selectionEnd;
+    const v = editorEl.value;
+    const startLine = (v.slice(0, s).match(/\n/g) || []).length;
+    const endLine = (v.slice(0, e).match(/\n/g) || []).length;
+
+    const anchors = previewAnchors();
+    contentEl.querySelectorAll('.sync-hit').forEach(function (el) {
+      el.classList.remove('sync-hit');
+    });
+    if (s === e || !anchors.length) return;   // 无选中内容
+
+    let firstEl = null;
+    anchors.forEach(function (pair) {
+      const ln = pair[0];
+      const el = pair[1];
+      if (ln >= startLine && ln <= endLine) {
+        el.classList.add('sync-hit');
+        if (!firstEl) firstEl = el;
+      }
+    });
+    if (firstEl) {
+      // 让选中的内容在预览窗口中居中
+      const top = elTopIn(contentWrapEl, firstEl);
+      const h = firstEl.offsetHeight || 0;
+      const view = contentWrapEl.clientHeight;
+      contentWrapEl.scrollTop = Math.max(0, top - view / 2 + h / 2);
+    }
+  }
+
+  let selTimer = 0;
+  function onEditorSelectionChange() {
+    clearTimeout(selTimer);
+    selTimer = setTimeout(highlightPreviewForSelection, 120);
+  }
+
+  editorEl.addEventListener('select', onEditorSelectionChange);
+  editorEl.addEventListener('keyup', onEditorSelectionChange);
+  editorEl.addEventListener('mouseup', onEditorSelectionChange);
+  document.addEventListener('selectionchange', function () {
+    if (document.activeElement === editorEl) onEditorSelectionChange();
+  });
+
+  // 反向：点击预览块 -> 编辑器定位到对应源码行
+  contentEl.addEventListener('click', function (ev) {
+    if (state.mode !== 'split') return;
+    if (ev.target.closest('a, button, .copy-btn, [data-copy]')) return;
+    let el = ev.target;
+    while (el && el !== contentEl && !el.getAttribute('data-line')) {
+      el = el.parentElement;
+    }
+    if (!el || !el.getAttribute || !el.getAttribute('data-line')) return;
+    const line = parseInt(el.getAttribute('data-line'), 10);
+    const lines = editorEl.value.split('\n');
+    let pos = 0;
+    for (let k = 0; k < line && k < lines.length; k++) pos += lines[k].length + 1;
+    editorEl.focus();
+    editorEl.setSelectionRange(pos, pos);
+    const lh = editorLineHeight();
+    editorScrollEl.scrollTop = Math.max(0, line * lh - editorScrollEl.clientHeight / 3);
+  });
 
   $('editor').addEventListener('keydown', function (e) {
     if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
