@@ -1,4 +1,7 @@
 # Generated reading pages (open-md.ps1 writes <name>.reader.html beside the document)
+# e2e fixture dumped by hand from the launcher flow (_real.html); it embeds a real
+# document plus a write-back token, so it must never be committed
+_real.html
 *.reader.html
 
 # Build and dependency artefacts

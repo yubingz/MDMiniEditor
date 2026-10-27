@@ -40,6 +40,7 @@
 - A credits bar shows `© 2026 yubingz`, the MIT licence, and links to the repository and its issue tracker, and invites stars, issues and pull requests. It is plain markup — the page still loads nothing until you click — and it is hidden when you print (#34)
 - The README feature lists name the editor pane, the split view and image rendering. Both files introduce the project as a reader *and editor* (#36), but the lists still described a read-only reader, so a visitor scanning them saw half the tool (#42)
 - `Ctrl+S` saves back to the opened file even when it was opened by double-clicking (the launcher flow, where the page has no file handle): the launcher starts a loopback-only, token-gated writer that overwrites the one opened document, and Save falls back to a file dialog or a copy only when no writer answers. A separate `另存为 / Save As` (`Ctrl+Shift+S`) always opens a save dialog with a file-name box (#46)
+- Two-way scroll sync in split view. Preview blocks carry the source line they start on (`data-line`), so editor and preview follow each other's scroll, selecting source text highlights the matching block, and clicking a preview block jumps the editor to it. Alignment reads real DOM positions, not scrollTop/line-height estimates — soft wrapping makes those wrong by ~2x on long documents (#51)
 
 ### Changed
 - Typesetting is spread over animation frames. The project's own 140 KB paper holds 1307 formulas at ~0.9 ms each, so a single synchronous pass blocked the first paint for over a second
