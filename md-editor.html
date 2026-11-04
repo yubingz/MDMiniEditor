@@ -1016,11 +1016,72 @@
     return CJK.test(body);
   }
 
+  // A `\(...\)` span whose body contains a *bare* CJK run is prose (the mis-paired
+  // price case: \(5.50 和 \)). But exporters routinely put Chinese inside \text{} —
+  // "10^{(\text{起点}+0.5k)/10}" is a real formula. Mask \text{...}/\mbox{...} bodies
+  // before the prose test so their CJK does not veto the whole span. Braces inside
+  // are rare in exports; nesting is not tracked here on purpose.
+  const TEX_GROUP_RE = /\\(?:text|textrm|mbox|textbf|textit)\s*\{[^{}]*\}/g;
+
+  function hasBareCJK(s) {
+    return CJK.test(s.replace(TEX_GROUP_RE, '\u2400'));
+  }
+
+  // ── AMS / LaTeX2e delimiters: \( ... \) and \[ ... \] ────────────────
+  // Exporters from Word/LaTeX (the "old standard") write math with `\( \)` and
+  // `\[ \]` instead of `$`/`$$`. KaTeX knows neither pair, so without this the
+  // whole formula renders as escaped literal text. The reader treats them as a
+  // third delimiter pair feeding the same math store as `$`:
+  //   * an opener must be preceded by an even number of backslashes — `\\(` is
+  //     the Markdown hard-break command followed by `(`, not math;
+  //   * a `\(...\)` span that contains a newline is not inline math (AMS
+  //     semantics), and one straddling CJK prose is rejected by the same
+  //     isNonFormulaSpan() rule that guards mis-paired `$` prices;
+  //   * `\[...\]` may span lines, like `$$...$$`.
+  const MATH_DISP_OPEN_RE = /\\\[/g;
+
+  function evenBackslashes(s, at) {
+    let n = 0;
+    for (let k = at - 1; k >= 0 && s[k] === '\\'; k--) n++;
+    return n % 2 === 0;
+  }
+
+  // Index of the next `\)`, or -1. The AMS closer is the PAIR `\)`; a bare `)`
+  // never ends a span. It counts as a closer only when its backslash is itself
+  // unescaped — an even run of backslashes before the pair (`\\)` would be an
+  // escaped backslash followed by a stray paren, not a delimiter).
+  function findMathClose(text, closeTok, from) {
+    let ci = text.indexOf('\\' + closeTok, from);
+    while (ci >= 0) {
+      if (evenBackslashes(text, ci)) return ci;   // ci points at the '\' of "\)"
+      ci = text.indexOf('\\' + closeTok, ci + 1);
+    }
+    return -1;
+  }
+
+
   function protectInlineMath(line, store) {
     let s = '';
     let i = 0;
     while (i < line.length) {
       if (line[i] === '\\' && line[i + 1] === '$') { s += '\\$'; i += 2; continue; }
+      // AMS inline math: \( ... \) on one line. An odd number of preceding
+      // backslashes means the `(` is escaped (`\\(` = hard break + paren), not
+      // an opener. Same store, same prose guard as `$...$`.
+      if (line[i] === '\\' && line[i + 1] === '(' && evenBackslashes(line, i)) {
+        const closeAt = findMathClose(line, ')', i + 2);
+        if (closeAt >= 0) {
+          const body = line.slice(i + 2, closeAt);
+          // AMS spans may carry Chinese inside \text{} — mask those groups first,
+          // then apply the same prose guard as `$...$`.
+          if (body && !hasBareCJK(body)) {
+            store.push({ tex: normalizeTex(body), display: false });
+            s += mathPh(store.length - 1);
+            i = closeAt + 2;   // consume the "\)" pair
+            continue;
+          }
+        }
+      }
       if (line[i] === '$') {
         let j = i + 1;
         while (j < line.length) {
@@ -1055,6 +1116,10 @@
     let inCode = false;
     let inDisplay = false;
     let displayBuf = [];
+    // AMS display math: \[ ... \], may span lines like $$...$$. Kept separate
+    // from the $$ state so a document mixing both never cross-closes them.
+    let inAmsDisp = false;
+    let amsDispBuf = [];
     const out = [];
 
     for (let li = 0; li < lines.length; li++) {
@@ -1066,6 +1131,21 @@
       }
       if (inCode) {
         out.push(line);
+        continue;
+      }
+
+      if (inAmsDisp) {
+        const closeAt = findMathClose(line, ']', 0);
+        if (closeAt >= 0) {
+          amsDispBuf.push(line.slice(0, closeAt));
+          const joined = amsDispBuf.join('\n');
+          store.push({ tex: normalizeTex(joined), display: true });
+          out.push(mathPh(store.length - 1) + line.slice(closeAt + 2));
+          inAmsDisp = false;
+          amsDispBuf = [];
+        } else {
+          amsDispBuf.push(line);
+        }
         continue;
       }
 
@@ -1100,11 +1180,38 @@
         }
       }
 
+      // AMS display opener on this line: \[ ... \] same-line, or start a
+      // multi-line block. Checked after $$ so a mixed line keeps $$ semantics.
+      const amsOpen = (() => {
+        MATH_DISP_OPEN_RE.lastIndex = 0;
+        let m;
+        while ((m = MATH_DISP_OPEN_RE.exec(line))) {
+          if (evenBackslashes(line, m.index)) return m.index;
+        }
+        return -1;
+      })();
+      if (amsOpen >= 0) {
+        const closeAt = findMathClose(line, ']', amsOpen + 2);
+        if (closeAt >= 0) {
+          const body = line.slice(amsOpen + 2, closeAt);
+          store.push({ tex: normalizeTex(body), display: true });
+          line = line.slice(0, amsOpen) + mathPh(store.length - 1) + line.slice(closeAt + 2);
+        } else {
+          inAmsDisp = true;
+          amsDispBuf = [line.slice(amsOpen + 2)];
+          out.push(line.slice(0, amsOpen));
+          continue;
+        }
+      }
+
       out.push(protectInlineMath(line, store));
     }
 
     if (inDisplay) {
       out.push('$$' + displayBuf.join('\n'));
+    }
+    if (inAmsDisp) {
+      out.push('\\[' + amsDispBuf.join('\n'));
     }
     return { text: out.join('\n'), store: store };
   }
@@ -1920,6 +2027,10 @@
     cup: '∪', cap: '∩', emptyset: '∅', forall: '∀', exists: '∃',
     rightarrow: '→', to: '→', leftarrow: '←', Rightarrow: '⇒', Leftarrow: '⇐',
     leftrightarrow: '↔', mapsto: '↦', angle: '∠', perp: '⊥', parallel: '∥',
+    // Norm delimiters. `\|` is the TeX double-vertical (‖) used as ‖x‖;
+    // \Vert/\vert are its AMS aliases. Without these the offline fallback
+    // fell through to the escaped-punct branch and printed a bare `|`.
+    '|': '∥', Vert: '∥', vert: '∣', lVert: '∥', rVert: '∥', lvert: '∣', rvert: '∣',
     prime: '′', hbar: 'ℏ', ell: 'ℓ', Re: 'ℜ', Im: 'ℑ', aleph: 'ℵ',
     ldots: '…', vdots: '⋮', ddots: '⋱', quad: ' ', qquad: '  ',
     ',': ' ', ';': ' ', ':': ' ', '!': '', ' ': ' ', '\\': ' '
@@ -1977,6 +2088,9 @@
             const ch = src[j];
             if (ch === '{' || ch === '}' || ch === '_' || ch === '%' || ch === '$' || ch === '&' || ch === '#' || ch === '\\') {
               out += htmlEscape(ch);
+            } else if (SYMBOLS[ch] != null) {
+              // spacing commands AND the norm bars (\| -> ∥, \. etc. when mapped)
+              out += SYMBOLS[ch];
             } else if (ch === ',' || ch === ';' || ch === ':' || ch === '!' || ch === ' ') {
               out += SYMBOLS[ch] != null ? SYMBOLS[ch] : ' ';
             } else {
@@ -2081,6 +2195,21 @@
         buf += '$';
         i += 2;
         continue;
+      }
+      // AMS delimiters on the DOM safety-net path — same rules as
+      // protectInlineMath/protectMath: even-backslash opener, prose guard,
+      // \(..\) must not straddle a newline.
+      if (text[i] === '\\' && (text[i + 1] === '(' || text[i + 1] === '[') && evenBackslashes(text, i)) {
+        const display = text[i + 1] === '[';
+        const closeTok = display ? ']' : ')';
+        const end = findMathClose(text, closeTok, i + 2);
+        const body = end >= 0 ? text.slice(i + 2, end) : null;
+        if (body != null && !hasBareCJK(body) && (display || body.indexOf('\n') < 0)) {
+          if (buf) { segs.push({ type: 'text', value: buf }); buf = ''; }
+          segs.push({ type: 'math', value: body, display: display });
+          i = end + 2;   // consume the "\)" / "\]" pair
+          continue;
+        }
       }
       if (text[i] === '$' && text[i + 1] === '$') {
         if (buf) { segs.push({ type: 'text', value: buf }); buf = ''; }
