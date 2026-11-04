@@ -91,6 +91,14 @@ test('known fallback rendering is unchanged', () => {
   assert.match(math.fallbackTexToHtml('\\text{abc}'), /math-text/, '\\text still renders as text');
 });
 
+test('norm bars render as ‖, not as a bare pipe (2026-11-04 bug report)', () => {
+  // The regression: \| fell through the escaped-punct branch and printed '|'.
+  assert.equal(render('\\|\\ell_S\\|^2'), '∥ℓS∥2');
+  assert.equal(render('\\Vert x \\Vert'), '∥ x ∥');
+  assert.equal(render('\\lvert a \\rvert'), '∣ a ∣');
+  assert.ok(!render('\\|x\\|').includes('|'), 'a bare pipe leaked');
+});
+
 // Non-vacuity: the assertions above must fail if the tables/unknown-command
 // handling are reverted. Guard the pieces the tests depend on.
 test('the operator table and the no-backslash degrade are both present', () => {

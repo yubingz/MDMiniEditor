@@ -71,6 +71,23 @@ $katexCssPath = Join-Path $PSScriptRoot 'katex\katex.min.css'
 if ((Test-Path $katexJsPath) -and (Test-Path $katexCssPath)) {
     $katexJs = [IO.File]::ReadAllText($katexJsPath, [Text.Encoding]::UTF8)
     $katexCss = [IO.File]::ReadAllText($katexCssPath, [Text.Encoding]::UTF8)
+    # The generated page is written beside the *document*, so the stylesheet's
+    # relative `url(fonts/…)` would resolve next to the document and 404 —
+    # KaTeX then typesets with fallback fonts (‖ renders as //). Rewrite every
+    # font reference to a base64 data URI so the page is truly self-contained.
+    $fontDir = Join-Path $PSScriptRoot 'katex\fonts'
+    $katexCss = [regex]::Replace($katexCss, 'url\((fonts/[^)]+)\)', {
+        param($m)
+        $rel = $m.Groups[1].Value
+        $f = Join-Path $fontDir ([IO.Path]::GetFileName($rel))
+        if (-not (Test-Path -LiteralPath $f)) { return $m.Value }
+        $mime = switch ([IO.Path]::GetExtension($f).ToLowerInvariant()) {
+            '.woff2' { 'font/woff2' }
+            '.woff'  { 'font/woff' }
+            default  { 'font/ttf' }
+        }
+        return 'url(data:' + $mime + ';base64,' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($f)) + ')'
+    })
     $html = $html.Replace('</head>', "`n<style>`n$katexCss`n</style>`n</head>")
     $html = $html.Replace('<script>', "<script>`n$katexJs`n</script>`n<script>")
 }

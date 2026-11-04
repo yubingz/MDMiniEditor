@@ -101,6 +101,23 @@ test('the inlined CSS keeps the font URLs resolvable from the generated page', (
   assert.ok(existsSync(join(ROOT, 'katex', 'fonts')), 'katex/fonts does not exist');
 });
 
+test('open-md.ps1 rewrites font urls to base64 data URIs', () => {
+  // The regression this guards (2026-11-04): the launcher inlined the CSS with its relative
+  // `url(fonts/…)` intact. The generated page sits beside the DOCUMENT, not beside katex/,
+  // so every font 404'd and KaTeX typeset with fallback fonts — ‖ (U+2225, the norm bars)
+  // then rendered as slanted "//" glyphs. Verified: inlined-fonts simulation loads 0/20 faces,
+  // the fixed pipeline rewrites all 40 woff2/woff urls and keeps the .ttf refs that the
+  // distribution does not ship.
+  assert.ok(
+    ps1.includes("[regex]::Replace($katexCss, 'url\\((fonts/[^)]+)\\)'"),
+    'open-md.ps1 must rewrite url(fonts/…) in the inlined CSS'
+  );
+  assert.match(ps1, /ToBase64String\(\[IO\.File\]::ReadAllBytes\(\$f\)\)/,
+    'open-md.ps1 must inline the font bytes as base64');
+  assert.match(ps1, /return \$m\.Value/,
+    'a font file that is missing must be left as-is, not blanked');
+});
+
 test('open-md.ps1 inlines from the sibling katex/ folder, and tolerates it being absent', () => {
   // Both files are required; a half-present distribution must be treated as absent rather
   // than inlined as a broken page.
