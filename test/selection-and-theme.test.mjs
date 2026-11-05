@@ -82,27 +82,62 @@ test('cycling visits all three states and returns to the start', () => {
   assert.equal(pref, 'auto', 'three presses must return to the starting state');
 });
 
-test('the selection background is translucent, so it cannot cover the glyph layer', () => {
-  // The visible text lives in .editor-hl UNDER .editor-ta. A selection block
-  // that paints fully opaque hides it. Assert the alpha channel stays well
-  // below opaque: color-mix(...) with a percentage below 100, or an rgba()/
-  // hsla() alpha below 1.
-  const block = html.slice(html.indexOf('.editor-ta::selection'), html.indexOf('.editor-ta::selection') + 700);
-  assert.ok(block.includes('::selection'), 'rule present');
-  const mix = block.match(/color-mix\(in srgb,\s*(?:var\((--[\w-]+)\)|#[0-9a-f]{3,8}|rgb[^,]*)\s+(\d+(?:\.\d+)?)%/i);
-  if (mix) {
-    assert.ok(Number(mix[2]) < 100, `selection background is ${mix[2]}% — opaque hides the text underneath`);
-  } else {
-    const alpha = block.match(/rgba?\([^)]*?,\s*(0?\.\d+|1|0)\s*\)/i);
-    assert.ok(alpha, 'selection background must be a colour with explicit alpha');
-    assert.ok(Number(alpha[1]) < 1, `selection alpha ${alpha[1]} is opaque`);
+test('the selected run is painted in a legible colour, not left transparent', () => {
+  // The real defect: the visible glyphs live in .editor-hl UNDER the textarea,
+  // and the textarea's own text is transparent. During selection the browser
+  // re-paints the selected run itself using ::selection's `color`. Setting that
+  // to transparent (which the pane used to do) painted nothing on top of the
+  // band, and the band covered the highlight layer: the selected line went
+  // blank. So the selection must carry BOTH an opaque-enough band and a text
+  // colour that contrasts with it.
+  // Match the rule itself, not the selector mentioned inside a comment. Strip
+  // comments first: the explanation block names the selector and quotes the old
+  // broken declarations, so a raw slice would read the comment as CSS.
+  const stripped = html.replace(/\/\*[\s\S]*?\*\//g, '');
+  const at = stripped.search(/\.editor-ta::selection\s*\{/);
+  assert.ok(at > 0, '.editor-ta::selection rule missing');
+  const open = stripped.indexOf('{', at);
+  const close = stripped.indexOf('}', open);
+  const decls = stripped.slice(open, close);
+
+  assert.match(decls, /color:\s*var\(--sel-fg\)/, 'selection text colour must come from --sel-fg');
+  assert.ok(
+    !/color:\s*transparent/.test(decls),
+    'selection text is transparent — the browser paints the selected run with this colour, so the line renders blank'
+  );
+  assert.match(decls, /background:\s*var\(--sel-bg\)/, 'selection band must come from --sel-bg');
+
+  // Contrast of the two variables in both schemes: a selection is still text.
+  const vars = {};
+  for (const m of html.matchAll(/--sel-(bg|fg):\s*(#[0-9a-f]{3,8})/gi)) {
+    const scheme = html.slice(0, m.index).includes('data-theme="dark"') ? 'dark' : 'light';
+    vars[scheme] = vars[scheme] || {};
+    vars[scheme][m[1].toLowerCase()] = m[2];
+  }
+  assert.ok(vars.light && vars.dark, `both schemes need --sel-bg/--sel-fg, got ${JSON.stringify(vars)}`);
+
+  const lum = (hex) => {
+    const h = hex.replace('#', '');
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+    const f = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+  };
+  for (const scheme of ['light', 'dark']) {
+    const { bg, fg: fgHex } = vars[scheme];
+    const [hi, lo] = [lum(bg), lum(fgHex)].sort((a, b) => b - a);
+    const ratio = (hi + 0.05) / (lo + 0.05);
+    assert.ok(ratio >= 4.5, `${scheme} selection contrast is ${ratio.toFixed(2)}:1, below the 4.5:1 body-text floor`);
   }
 });
 
 test('selection colour is defined for both schemes', () => {
   // A rule that only lands in light mode ships a broken dark mode.
-  const block = html.slice(html.indexOf('.editor-ta::selection'), html.indexOf('.editor-ta::selection') + 700);
-  assert.ok(/color-mix|\bvar\(--/.test(block), 'must derive from theme variables, not a fixed colour');
+  const stripped = html.replace(/\/\*[\s\S]*?\*\//g, '');
+  const at = stripped.search(/\.editor-ta::selection\s*\{/);
+  const open = stripped.indexOf('{', at);
+  const close = stripped.indexOf('}', open);
+  const decls = stripped.slice(open, close);
+  assert.ok(/var\(--sel-/.test(decls), 'must derive from theme variables, not a fixed colour');
 });
 
 test('the three scheme buttons exist and the old single toggle is gone', () => {

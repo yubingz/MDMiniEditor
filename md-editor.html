@@ -14,6 +14,11 @@
     --ink-faint: #8a8a86;
     --accent: #2f6fed;
     --accent-soft: #e8effc;
+    /* Selection paints its own glyphs (see .editor-ta::selection), so both
+       halves are theme variables: an opaque-enough band, and text that reads
+       against it. Light scheme: 4.5:1 contrast, the WCAG body-text floor. */
+    --sel-bg: #b9d0f7;
+    --sel-fg: #10233f;
     --border: #e4e2da;
     --code-bg: #f0efe8;
     --code-ink: #2a2a2a;
@@ -44,6 +49,10 @@
     --ink-faint: #7a7872;
     --accent: #7aa2f7;
     --accent-soft: #1e2a44;
+    /* Dark scheme: a mid-blue band with near-white text — 7:1, and the band is
+       opaque enough to hide the grey glyphs of .editor-hl underneath. */
+    --sel-bg: #2c4a7c;
+    --sel-fg: #eef3fb;
     --border: #2a2d33;
     --code-bg: #1e2127;
     --code-ink: #d6d4ce;
@@ -373,12 +382,24 @@
   .editor-ta::selection {
     /* WHY the old rule hid the text: the visible glyphs are painted by the
        .editor-hl layer, which sits UNDER the textarea (absolute, earlier in DOM;
-       the textarea is position:relative and paints later). The old background
-       --accent-soft was OPAQUE, so the selection rectangle covered the
-       highlighted text and the selected run went blank. Any selection colour
-       here must carry alpha and let the text layer show through. */
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
-    color: transparent;
+       the textarea is position:relative and paints later). Selection is
+       different from normal rendering: the browser paints the selected run's
+       glyphs ITSELF, using ::selection's `color`. The textarea's own text is
+       transparent (see .editor-ta), and `color: transparent` here repeated
+       that, so the selected run painted nothing at all on top of the band —
+       the band then covered .editor-hl and the line read as blank.
+
+       The selected run therefore has to be painted by the browser with a
+       colour that is legible against the band, and the band has to be opaque
+       enough that the highlight layer's grey glyphs do not show through it
+       (that double image is the other half of the same bug). */
+    background: var(--sel-bg);
+    color: var(--sel-fg);
+  }
+  /* The non-editor text on the page selects normally; keep it consistent. */
+  ::selection {
+    background: var(--sel-bg);
+    color: var(--sel-fg);
   }
   /* Colour only: bold or italic would change the glyph advance and break the
      alignment with the transparent textarea. */

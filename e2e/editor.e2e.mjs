@@ -507,13 +507,21 @@ test('selected text stays readable over its selection band', OPTS, async () => {
       alpha = parts.length > 3 ? parts[3] : 1;
     }
     const r = ta.getBoundingClientRect();
-    return { bg, alpha, box: { x: r.left, y: r.top, w: r.width, h: r.height } };
+    return { bg, alpha, fg: cs.color, box: { x: r.left, y: r.top, w: r.width, h: r.height } };
   });
 
   assert.ok(probe.alpha !== null, `could not read a selection colour: ${probe.bg}`);
+  // The band must be opaque enough to hide the highlight layer's grey glyphs,
+  // AND the selected run must be re-painted in a visible colour: the browser
+  // draws the selected text itself, so a transparent `color` leaves the band
+  // covering the only glyphs on screen and the line reads as blank.
   assert.ok(
-    probe.alpha < 1,
-    `selection background ${probe.bg} is fully opaque — it would cover the highlight layer and blank the selected text`
+    probe.alpha > 0.5,
+    `selection background ${probe.bg} is too transparent — the highlight layer's glyphs show through and double the text`
+  );
+  assert.ok(
+    probe.fg && probe.fg !== 'rgba(0, 0, 0, 0)' && probe.fg !== 'transparent',
+    `selection text colour is ${probe.fg} — transparent leaves the selected run unpainted`
   );
 });
 
