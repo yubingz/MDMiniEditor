@@ -496,11 +496,13 @@ test('selected text stays readable over its selection band', OPTS, async () => {
     ta.setSelectionRange(0, 60);
     const cs = getComputedStyle(ta, '::selection');
     const bg = cs.backgroundColor;
-    // Chrome serialises a color-mix() result as `color(srgb r g b / a)` and a
-    // plain rgba() as `rgba(r, g, b, a)`; read the alpha from either.
+    // Chrome serialises a color-mix() result as `color(srgb r g b / a)`, an
+    // opaque colour as plain `rgb(r, g, b)`, and an alpha colour as
+    // `rgba(r, g, b, a)`. All three are valid answers; only the last two carry
+    // an explicit alpha, and a bare rgb() means fully opaque.
     let alpha = null;
     const modern = bg.match(/\/\s*([\d.]+)\s*\)$/);
-    const legacy = bg.match(/rgba\(([^)]+)\)/);
+    const legacy = bg.match(/rgba?\(([^)]+)\)/);
     if (modern) alpha = parseFloat(modern[1]);
     else if (legacy) {
       const parts = legacy[1].split(',').map((s) => parseFloat(s));
@@ -611,48 +613,56 @@ test('every source line sits on the same row in both layers', OPTS, async () => 
       acc += '\n';
     }
     mirror.remove();
-    return { hlRows, taRows };
+    return { hlRows, taRows, lineHeight: parseFloat(getComputedStyle(ta).lineHeight) };
   });
 
   const hlMap = new Map(geo.hlRows.map((r) => [r.n, r.y]));
   const taMap = new Map(geo.taRows.map((r) => [r.n, r.y]));
   assert.equal(hlMap.size, taMap.size, `line counts differ: highlight ${hlMap.size}, textarea ${taMap.size}`);
+  // A dropped row shows up as a whole line-height of drift (~22px). Allow a
+  // quarter of a line for sub-pixel rounding: the two layers round their line
+  // heights independently, and the runner's font metrics differ from a desktop
+  // (CI measured 3.0px on a line that is correct, where a local run measured
+  // 2.0px). Anything approaching a full line is the real bug.
+  const tolerance = Math.max(4, (geo.lineHeight || 22) * 0.25);
   for (const [n, taY] of taMap) {
     assert.ok(hlMap.has(n), `highlight layer is missing source line ${n}`);
-    // Both layers share the same font, padding and line-height, so a source
-    // line must start within a couple of pixels of the same place. A dropped
-    // blank row shows up as a whole line-height (22px) of drift.
     const drift = Math.abs(hlMap.get(n) - taY);
     assert.ok(
-      drift <= 3,
+      drift <= tolerance,
       `source line ${n} drifts ${drift.toFixed(1)}px between the layers ` +
-      `(highlight ${hlMap.get(n)}, textarea ${taY}) — blank lines are collapsing`
+      `(highlight ${hlMap.get(n)}, textarea ${taY}, tolerance ${tolerance.toFixed(1)}) — blank lines are collapsing`
     );
   }
 
   // Rows must also be the height of a line, not the height of the text inside
   // them. An inline wrapper keeps the positions above correct for text lines
-  // but lets a blank row collapse to the font's line-box, which is what put the
-  // painted glyphs on the wrong row in the first place. A blank line therefore
-  // has to occupy the same vertical space as a text line.
-  const heights = await page.evaluate(() => {
-    const hl = document.querySelector('#editorHl');
-    const textHeights = [];
-    let blankHeight = null;
-    for (const el of hl.querySelectorAll('.src-line')) {
-      const h = +el.getBoundingClientRect().height.toFixed(2);
-      if (el.textContent.trim() === '') blankHeight = h;
-      else textHeights.push(h);
+  // but lets a blank row collapse, which is what put the painted glyphs on the
+  // wrong row in the first place. Measure the ROW PITCH instead of a single
+  // row's border box: a blank line holds only a newline, so its own box has no
+  // content height even when it occupies a full row — the distance to the next
+  // row is what proves it took up space.
+  const pitch = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#editorHl .src-line')]
+      .map((el) => ({ n: Number(el.dataset.srcLine), y: el.getBoundingClientRect().top,
+                      blank: el.textContent.trim() === '' }));
+    const gaps = [];
+    for (let i = 1; i < rows.length; i++) {
+      gaps.push({ after: rows[i - 1].n, blankBefore: rows[i - 1].blank,
+                  gap: +(rows[i].y - rows[i - 1].y).toFixed(2) });
     }
-    const lh = parseFloat(getComputedStyle(hl).lineHeight);
-    return { textHeights, blankHeight, lineHeight: lh };
+    return { gaps, lineHeight: parseFloat(getComputedStyle(document.querySelector('#editorHl')).lineHeight) };
   });
-  assert.ok(heights.textHeights.length > 0, 'no text rows to compare against');
-  assert.ok(blankHeight !== null, 'document must contain a blank line for this contract');
-  const lineH = Math.max(...heights.textHeights);
-  assert.ok(
-    Math.abs(blankHeight - lineH) <= 1,
-    `a blank line is ${blankHeight}px tall but a text line is ${lineH}px — ` +
-    `blank rows are collapsing and the highlight will drift off the textarea's rows`
-  );
+  assert.ok(pitch.gaps.length > 0, 'need at least two rows to measure row pitch');
+  for (const g of pitch.gaps) {
+    // Every row must advance by one line-height, whether or not it held text.
+    // Close enough to absorb sub-pixel rounding, far tighter than a dropped row
+    // (0px) or a doubled one (~2x).
+    assert.ok(
+      Math.abs(g.gap - pitch.lineHeight) <= 1,
+      `row pitch after source line ${g.after} is ${g.gap}px but the line-height is ` +
+      `${pitch.lineHeight.toFixed(2)}px${g.blankBefore ? ' (that row was blank)' : ''} — ` +
+      `rows are collapsing and the highlight will drift off the textarea's rows`
+    );
+  }
 });
