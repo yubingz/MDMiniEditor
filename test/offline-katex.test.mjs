@@ -209,8 +209,10 @@ test('a $ that is not a formula is kept as text instead of swallowing the line',
   assert.ok(inline, 'could not read protectInlineMath');
   assert.doesNotMatch(inline[0], /mathish/,
     'protectInlineMath still gates on a math-ish heuristic, so a non-formula $ span is dropped');
-  assert.match(inline[0], /if \(!isNonFormulaSpan\(body\)\) \{/,
-    'protectInlineMath does not store every closed $ span that is not prose');
+  // The prose test must be the \text{}-aware one: a formula may carry Chinese inside
+  // \text{} (a cases branch labelled 不可识别), and isNonFormulaSpan() would reject it.
+  assert.match(inline[0], /if \(!hasBareCJK\(body\)\) \{/,
+    'protectInlineMath does not store every closed $ span that is not bare prose');
 
   const segs = reader.match(/function\s+splitTexSegments[\s\S]*?\n  \}/);
   assert.ok(segs, 'could not read splitTexSegments');
@@ -227,12 +229,12 @@ test('a $ span straddling prose is text, and the whole line survives two prices'
   // pairs the first `$` with the second and swallows everything between them —
   // "税费 $5.50 和 $6.00 元" rendered as "税费 <math>6.00 元". The span there contains
   // Chinese, which is what the test keys on.
-  const fn = reader.match(/function\s+isNonFormulaSpan[\s\S]*?\n  \}/);
-  assert.ok(fn, 'could not read isNonFormulaSpan');
-  assert.match(fn[0], /CJK\.test\(body\)/,
-    'isNonFormulaSpan must test for CJK, not for a leading digit');
+  const fn = reader.match(/function\s+hasBareCJK[\s\S]*?\n  \}/);
+  assert.ok(fn, 'could not read hasBareCJK');
+  assert.match(fn[0], /CJK\.test\(s\.replace\(TEX_GROUP_RE/,
+    'the prose test must strip \\text{} groups and then test for bare CJK, not for a leading digit');
   // Both entry points must use it — a guard in only one of them leaves the other eating text.
-  assert.match(segsOf(reader), /if \(!isNonFormulaSpan\(body\) && body\.indexOf\('\\n'\) < 0\) \{/,
+  assert.match(segsOf(reader), /if \(!hasBareCJK\(body\) && body\.indexOf\('\\n'\) < 0\) \{/,
     'splitTexSegments does not apply the prose test');
 });
 
@@ -241,10 +243,10 @@ test('a numerical result is a formula, not a price', () => {
   // version of the prose guard keyed on "starts with a digit", which rejected 554 spans of
   // the form `$0.87$`, `$15$`, `$13$` — a paper's normal way of writing a number. Every one
   // of them rendered as literal text.
-  const fn = reader.match(/function\s+isNonFormulaSpan[\s\S]*?\n  \}/);
-  assert.ok(fn, 'could not read isNonFormulaSpan');
+  const fn = reader.match(/function\s+hasBareCJK[\s\S]*?\n  \}/);
+  assert.ok(fn, 'could not read hasBareCJK');
   assert.doesNotMatch(fn[0], /\[0-9\]/,
-    'isNonFormulaSpan keys on a leading digit, so `$15$` and `$0.87$` become text');
+    'the prose test keys on a leading digit, so `$15$` and `$0.87$` become text');
   // And a price span really does contain CJK, which is the signal the rule relies on.
   assert.ok(!/[\u4E00-\u9FFF]/.test('0.87'), 'a bare number must not look like prose');
   assert.ok(/[\u4E00-\u9FFF]/.test('5.50 和 '), 'a price span must look like prose');

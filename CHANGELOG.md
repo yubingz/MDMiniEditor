@@ -3,6 +3,7 @@
 ## 2.0.x
 
 ### Fixed
+- A formula whose `\text{}` label is Chinese now renders instead of being printed as literal TeX. `$...$` was gated on a prose test that rejected any body containing CJK — the rule that keeps a mis-paired price span (`税费 $5.50 和 $6.00 元`) from swallowing the line — but a real formula may carry Chinese inside `\text{}`, as in a `cases` branch annotated 不可识别. The `\(...\)` branch already masked those groups before the test; the `$` branch did not, so the same document rendered differently depending on its delimiter. Both entry points (the preview and the reader page) now use `hasBareCJK`, and the now-unused `isNonFormulaSpan` is gone
 - Selected text in the edit pane is readable again. The failure had two independent halves, and fixing only the first is why an earlier attempt still looked broken:
   1. **The selected run was painted transparent.** The pane's visible glyphs live in `.editor-hl`, *under* the textarea, and the textarea's own text is `transparent`. During selection the browser re-paints the selected run itself using `::selection`'s `color` — and that was `color: transparent` too, so nothing was drawn on top of the band at all.
   2. **The band then covered the only glyphs on screen.** With a near-opaque `--accent-soft` rectangle painted over `.editor-hl`, a selected line read as blank.

@@ -1061,17 +1061,18 @@
     return s.replace(/^\s+|\s+$/g, '');
   }
 
-  // A `$...$` span that is not a formula, because the two `$` are not a real pair.
+  // A `$...$` span is prose, not a formula, when the two `$` are not a real pair.
   //
   // The previous rule keyed on "starts with a digit and has no TeX syntax", to catch
   // `$5.50`. That is wrong in the other direction: a numerical result is exactly what a
   // paper writes as `$0.87$`, `$15$`, `$13$`, and the rule silently rejected 554 of them in
   // this project's own 140 KB paper. What actually distinguishes a mis-paired span is that
   // it spans *prose* — Chinese text and its punctuation — as in the `$5.50 和 $` of
-  // "税费 $5.50 和 $6.00 元". A real formula never contains CJK.
-  function isNonFormulaSpan(body) {
-    return CJK.test(body);
-  }
+  // "税费 $5.50 和 $6.00 元".
+  //
+  // The test lives in hasBareCJK() below, which masks \text{...} groups first: a real
+  // formula may carry Chinese inside \text{} (a cases branch labelled 不可识别), so the
+  // bare-CJK rule is the correct one and both entry points use it.
 
   // A `\(...\)` span whose body contains a *bare* CJK run is prose (the mis-paired
   // price case: \(5.50 和 \)). But exporters routinely put Chinese inside \text{} —
@@ -1150,9 +1151,14 @@
           const body = line.slice(i + 1, j);
           // Any closed `$...$` span is a formula — including a bare number like `$0.87$` or
           // `$15$`, which is how a paper writes a numerical result. Only a span straddling
-          // prose is a mis-paired pair: in "税费 $5.50 和 $6.00 元" the first `$` pairs with
+          // *prose* is a mis-paired pair: in "税费 $5.50 和 $6.00 元" the first `$` pairs with
           // the second and the span contains Chinese.
-          if (!isNonFormulaSpan(body)) {
+          //
+          // Use hasBareCJK, not isNonFormulaSpan: a real formula may carry Chinese inside
+          // \text{...} (e.g. a cases branch labelled 不可识别). Masking those groups before
+          // the prose test is what keeps such a formula from being printed as literal TeX,
+          // and it matches the \(...\) branch above.
+          if (!hasBareCJK(body)) {
             store.push({ tex: normalizeTex(body), display: false });
             s += mathPh(store.length - 1);
             i = j + 1;
@@ -2297,7 +2303,10 @@
           // Same prose test as protectInlineMath, plus the pairing rule: a span that
           // contains a newline is not a formula either, so the original characters (both `$`
           // included) go back into the text rather than being consumed.
-          if (!isNonFormulaSpan(body) && body.indexOf('\n') < 0) {
+          // hasBareCJK masks \text{...} groups first, so a formula carrying Chinese inside
+          // it (a cases branch labelled 不可识别) still renders — the same rule the edit
+          // pane uses, so a document cannot render differently in the two views.
+          if (!hasBareCJK(body) && body.indexOf('\n') < 0) {
             if (buf) { segs.push({ type: 'text', value: buf }); buf = ''; }
             segs.push({ type: 'math', value: body, display: false });
           } else {
