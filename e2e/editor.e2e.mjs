@@ -553,3 +553,98 @@ test('colour scheme offers light / dark / follow-system and persists the pick', 
     'follow-system must re-read the OS preference each time, not cache the first answer'
   );
 });
+
+// The two layers must place the same source line on the same row. Reported
+// symptom: selecting a line showed the band over blank space, because the
+// highlight layer had dropped one row per blank line and its glyphs sat above
+// the row the textarea painted. Assert the row positions, not a pixel colour.
+test('every source line sits on the same row in both layers', OPTS, async () => {
+  ctx = await launch(join(work, 'profile-rows'));
+  const page = await ctx.newPage();
+  await page.goto(`${origin}/md-editor.html`);
+  // Blank lines are the trigger: they are where the two layers used to drift.
+  const md = ['# T', '', '（目标行，用来比对两层的行位置）', '', '', '最后一行', ''].join('\n');
+  await page.setInputFiles('#fileInput', { name: 'rows.md', mimeType: 'text/markdown', buffer: Buffer.from(md) });
+  await page.waitForFunction(() => document.querySelector('#editor').value.includes('目标行'));
+  await page.click('#btnModeEdit');
+  await page.waitForTimeout(300);
+
+  const geo = await page.evaluate(() => {
+    const hl = document.querySelector('#editorHl');
+    const ta = document.querySelector('#editor');
+    const hlTop = hl.getBoundingClientRect().top;
+
+    // Row tops in the highlight layer, relative to its own top edge.
+    const hlRows = [...hl.querySelectorAll('.src-line')].map((el) => ({
+      n: Number(el.dataset.srcLine),
+      y: +(el.getBoundingClientRect().top - hlTop).toFixed(2),
+    }));
+
+    // Row tops in the textarea, measured with a mirror that copies its box.
+    const ct = getComputedStyle(ta);
+    const mirror = document.createElement('div');
+    for (const k of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'lineHeight',
+      'letterSpacing', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+      'borderTopWidth', 'borderLeftWidth', 'whiteSpace', 'wordBreak', 'overflowWrap',
+      'tabSize', 'boxSizing', 'textIndent', 'width']) mirror.style[k] = ct[k];
+    Object.assign(mirror.style, { position: 'absolute', top: '0', left: '0', visibility: 'hidden' });
+    document.body.appendChild(mirror);
+    const lines = ta.value.split('\n');
+    const taRows = [];
+    let acc = '';
+    for (let i = 0; i < lines.length; i++) {
+      acc += lines[i];
+      mirror.textContent = acc;
+      const marker = document.createElement('span');
+      marker.textContent = '\u200b';
+      mirror.appendChild(marker);
+      taRows.push({ n: i, y: +(marker.getBoundingClientRect().top - mirror.getBoundingClientRect().top).toFixed(2) });
+      mirror.removeChild(marker);
+      acc += '\n';
+    }
+    mirror.remove();
+    return { hlRows, taRows };
+  });
+
+  const hlMap = new Map(geo.hlRows.map((r) => [r.n, r.y]));
+  const taMap = new Map(geo.taRows.map((r) => [r.n, r.y]));
+  assert.equal(hlMap.size, taMap.size, `line counts differ: highlight ${hlMap.size}, textarea ${taMap.size}`);
+  for (const [n, taY] of taMap) {
+    assert.ok(hlMap.has(n), `highlight layer is missing source line ${n}`);
+    // Both layers share the same font, padding and line-height, so a source
+    // line must start within a couple of pixels of the same place. A dropped
+    // blank row shows up as a whole line-height (22px) of drift.
+    const drift = Math.abs(hlMap.get(n) - taY);
+    assert.ok(
+      drift <= 3,
+      `source line ${n} drifts ${drift.toFixed(1)}px between the layers ` +
+      `(highlight ${hlMap.get(n)}, textarea ${taY}) — blank lines are collapsing`
+    );
+  }
+
+  // Rows must also be the height of a line, not the height of the text inside
+  // them. An inline wrapper keeps the positions above correct for text lines
+  // but lets a blank row collapse to the font's line-box, which is what put the
+  // painted glyphs on the wrong row in the first place. A blank line therefore
+  // has to occupy the same vertical space as a text line.
+  const heights = await page.evaluate(() => {
+    const hl = document.querySelector('#editorHl');
+    const textHeights = [];
+    let blankHeight = null;
+    for (const el of hl.querySelectorAll('.src-line')) {
+      const h = +el.getBoundingClientRect().height.toFixed(2);
+      if (el.textContent.trim() === '') blankHeight = h;
+      else textHeights.push(h);
+    }
+    const lh = parseFloat(getComputedStyle(hl).lineHeight);
+    return { textHeights, blankHeight, lineHeight: lh };
+  });
+  assert.ok(heights.textHeights.length > 0, 'no text rows to compare against');
+  assert.ok(blankHeight !== null, 'document must contain a blank line for this contract');
+  const lineH = Math.max(...heights.textHeights);
+  assert.ok(
+    Math.abs(blankHeight - lineH) <= 1,
+    `a blank line is ${blankHeight}px tall but a text line is ${lineH}px — ` +
+    `blank rows are collapsing and the highlight will drift off the textarea's rows`
+  );
+});

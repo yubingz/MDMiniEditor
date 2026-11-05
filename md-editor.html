@@ -382,6 +382,23 @@
   }
   /* Colour only: bold or italic would change the glyph advance and break the
      alignment with the transparent textarea. */
+  /* One row per source line. renderHighlight() wraps every line's first
+     segment in this span, and the edit pane's overlay depends on it being a
+     real box: an inline span around a blank line collapses to the font's
+     line-box, which is shorter than the textarea's line-height, and every
+     blank line then shifts the highlight layer up by the difference. Ten blank
+     lines put the painted glyphs ~45px away from the selection rectangle, so a
+     selected line looked blank (the glyphs were drawn outside the band). */
+  .src-line {
+    /* One block per source line. renderHighlight() wraps each full line — text
+       and its trailing newline — in this span, so the block is the line's row.
+       It must be a real box: with an inline span, a blank line's "\n" collapses
+       against the neighbouring line and the highlight layer loses that row,
+       putting every glyph one line above the row where the textarea paints the
+       selection. `white-space: pre-wrap` is inherited from .editor-hl, so a long
+       line still soft-wraps exactly as the textarea does. */
+    display: block;
+  }
   .ts-head { color: var(--hl-head); }
   .ts-em { color: var(--hl-em); }
   .ts-code { color: var(--hl-code); }
@@ -2887,29 +2904,50 @@
     // 估算结果与源行号差近一倍（2026-10-26 实测）。
     let srcLine = 0;
     let atLineStart = true;
+    let lineWrap = null;
     segments.forEach(function (seg) {
       const mk = function (text, cls) {
-        const node = cls === 'text'
-          ? document.createTextNode(text)
-          : (function () {
-              const s = document.createElement('span');
-              s.className = 'ts-' + cls;
-              s.textContent = text;
-              return s;
-            })();
-        if (atLineStart && text) {
-          const wrap = document.createElement('span');
-          wrap.className = 'src-line';
-          wrap.setAttribute('data-src-line', String(srcLine));
-          wrap.appendChild(node);
-          frag.appendChild(wrap);
-          // 这一行可能跨多个片段，只有第一个打标记
-          atLineStart = false;
-        } else {
-          frag.appendChild(node);
+        // One wrapper per source line. pushSegment() merges adjacent same-class
+        // segments, so a single segment can carry several newlines (a run of
+        // blank lines becomes one "\n\n\n" text segment). Splitting on the
+        // newlines here is what gives every line — including blank ones — its
+        // own row; wrapping a whole segment at once made the highlight layer
+        // lose one row per blank line, and every painted glyph then sat above
+        // the row where the textarea drew the selection band.
+        const parts = text.split('\n');
+        for (let k = 0; k < parts.length; k++) {
+          const piece = parts[k];
+          const hasNewline = k < parts.length - 1;
+          // Every line gets a row, blank ones included: the row is opened
+          // whenever one is not already open, and a lone "" between two
+          // newlines must still open (and close) its own row.
+          if (!lineWrap && (piece || hasNewline || k === parts.length - 1)) {
+            lineWrap = document.createElement('span');
+            lineWrap.className = 'src-line';
+            lineWrap.setAttribute('data-src-line', String(srcLine));
+            frag.appendChild(lineWrap);
+            atLineStart = false;
+          }
+          if (piece && lineWrap) {
+            const node = cls === 'text'
+              ? document.createTextNode(piece)
+              : (function () {
+                  const s = document.createElement('span');
+                  s.className = 'ts-' + cls;
+                  s.textContent = piece;
+                  return s;
+                })();
+            lineWrap.appendChild(node);
+          }
+          if (hasNewline) {
+            // the newline itself must stay inside the row's box, otherwise the
+            // row has no height and the next line starts on the same row
+            if (lineWrap) lineWrap.appendChild(document.createTextNode('\n'));
+            srcLine += 1;
+            atLineStart = true;
+            lineWrap = null;
+          }
         }
-        const n = (text.match(/\n/g) || []).length;
-        if (n) { srcLine += n; atLineStart = true; }
       };
       mk(seg.text, seg.cls);
     });
