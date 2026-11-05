@@ -20,7 +20,7 @@ A tiny, offline Markdown reader **and editor** for Windows — one HTML file plu
 - Two-way scroll sync in split view: the editor and preview follow each other, selecting source highlights the matching block, clicking a preview block jumps the editor there
 - Save-back: `Ctrl+S` overwrites the opened file — even when opened by double-clicking (the launcher's loopback writer); `Ctrl+Shift+S` (Save As) opens a file dialog
 - Table of contents
-- Dark / light theme
+- Colour scheme: 浅色 / 深色 / 跟随系统, remembered per browser; `Ctrl+Shift+L` cycles
 - Font size controls
 - Print / export PDF
 - Fully offline for file reading — nothing is uploaded
@@ -62,7 +62,7 @@ Open `md-editor.html` directly (double-click or `file://` URL).
 | `Ctrl+O` | Open file |
 | `Ctrl+S` | Save (overwrite the opened file) |
 | `Ctrl+Shift+S` | Save As (file dialog) |
-| `Ctrl+Shift+L` | Toggle theme |
+| `Ctrl+Shift+L` | Cycle colour scheme (light → dark → follow system) |
 | `Ctrl+=` / `Ctrl+-` | Increase / decrease font size |
 | `Ctrl+0` | Reset font size |
 

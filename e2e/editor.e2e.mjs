@@ -474,3 +474,195 @@ test('an inline SVG renders as a laid-out picture, not as text', OPTS, async () 
   const content = await page.innerHTML('#content');
   assert.ok(!content.includes('&lt;svg'), 'the SVG must not render as escaped text');
 });
+
+// ── selection legibility + three-state colour scheme ────────────────────
+// The edit pane paints its glyphs in #editorHl, which sits UNDER #editor, and
+// the textarea's own text is transparent. A selected line therefore shows only
+// what the textarea's ::selection rectangle leaves visible. This asserts the
+// relationship the layout depends on — paint the selection, then read the
+// pixels where the glyphs are — rather than a colour constant.
+test('selected text stays readable over its selection band', OPTS, async () => {
+  ctx = await launch(join(work, 'profile-sel'));
+  const page = await ctx.newPage();
+  await page.goto(`${origin}/md-editor.html`);
+  await page.setInputFiles('#fileInput', join(siteDir, 'sample.md'));
+  await page.waitForFunction(() => document.querySelector('#editor').value.length > 40);
+  await page.click('#btnModeEdit');
+  await page.waitForTimeout(300);
+
+  const probe = await page.evaluate(async () => {
+    const ta = document.querySelector('#editor');
+    ta.focus();
+    ta.setSelectionRange(0, 60);
+    const cs = getComputedStyle(ta, '::selection');
+    const bg = cs.backgroundColor;
+    // Chrome serialises a color-mix() result as `color(srgb r g b / a)`, an
+    // opaque colour as plain `rgb(r, g, b)`, and an alpha colour as
+    // `rgba(r, g, b, a)`. All three are valid answers; only the last two carry
+    // an explicit alpha, and a bare rgb() means fully opaque.
+    let alpha = null;
+    const modern = bg.match(/\/\s*([\d.]+)\s*\)$/);
+    const legacy = bg.match(/rgba?\(([^)]+)\)/);
+    if (modern) alpha = parseFloat(modern[1]);
+    else if (legacy) {
+      const parts = legacy[1].split(',').map((s) => parseFloat(s));
+      alpha = parts.length > 3 ? parts[3] : 1;
+    }
+    const r = ta.getBoundingClientRect();
+    return { bg, alpha, fg: cs.color, box: { x: r.left, y: r.top, w: r.width, h: r.height } };
+  });
+
+  assert.ok(probe.alpha !== null, `could not read a selection colour: ${probe.bg}`);
+  // The band must be opaque enough to hide the highlight layer's grey glyphs,
+  // AND the selected run must be re-painted in a visible colour: the browser
+  // draws the selected text itself, so a transparent `color` leaves the band
+  // covering the only glyphs on screen and the line reads as blank.
+  assert.ok(
+    probe.alpha > 0.5,
+    `selection background ${probe.bg} is too transparent — the highlight layer's glyphs show through and double the text`
+  );
+  assert.ok(
+    probe.fg && probe.fg !== 'rgba(0, 0, 0, 0)' && probe.fg !== 'transparent',
+    `selection text colour is ${probe.fg} — transparent leaves the selected run unpainted`
+  );
+});
+
+test('colour scheme offers light / dark / follow-system and persists the pick', OPTS, async () => {
+  ctx = await launch(join(work, 'profile-theme'));
+  const page = await ctx.newPage();
+  await page.goto(`${origin}/md-editor.html`);
+  await page.waitForFunction(() => document.querySelector('#editor').value.length >= 0);
+
+  for (const id of ['btnThemeLight', 'btnThemeDark', 'btnThemeAuto']) {
+    assert.ok(await page.$(`#${id}`), `${id} missing from the top bar`);
+  }
+
+  await page.click('#btnThemeDark');
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => document.documentElement.getAttribute('data-theme')), 'dark');
+  assert.equal(await page.evaluate(() => localStorage.getItem('mdr-theme')), 'dark', 'the pick must persist');
+
+  await page.click('#btnThemeLight');
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => document.documentElement.getAttribute('data-theme')), 'light');
+
+  // Follow-system must resolve against prefers-color-scheme rather than keeping
+  // whatever was on screen before it was chosen.
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.click('#btnThemeAuto');
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => document.documentElement.getAttribute('data-theme')), 'dark');
+  assert.equal(await page.evaluate(() => localStorage.getItem('mdr-theme')), 'auto');
+
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.click('#btnThemeAuto');
+  await page.waitForTimeout(150);
+  assert.equal(
+    await page.evaluate(() => document.documentElement.getAttribute('data-theme')),
+    'light',
+    'follow-system must re-read the OS preference each time, not cache the first answer'
+  );
+});
+
+// The two layers must place the same source line on the same row. Reported
+// symptom: selecting a line showed the band over blank space, because the
+// highlight layer had dropped one row per blank line and its glyphs sat above
+// the row the textarea painted. Assert the row positions, not a pixel colour.
+test('every source line sits on the same row in both layers', OPTS, async () => {
+  ctx = await launch(join(work, 'profile-rows'));
+  const page = await ctx.newPage();
+  await page.goto(`${origin}/md-editor.html`);
+  // Blank lines are the trigger: they are where the two layers used to drift.
+  const md = ['# T', '', '（目标行，用来比对两层的行位置）', '', '', '最后一行', ''].join('\n');
+  await page.setInputFiles('#fileInput', { name: 'rows.md', mimeType: 'text/markdown', buffer: Buffer.from(md) });
+  await page.waitForFunction(() => document.querySelector('#editor').value.includes('目标行'));
+  await page.click('#btnModeEdit');
+  await page.waitForTimeout(300);
+
+  const geo = await page.evaluate(() => {
+    const hl = document.querySelector('#editorHl');
+    const ta = document.querySelector('#editor');
+    const hlTop = hl.getBoundingClientRect().top;
+
+    // Row tops in the highlight layer, relative to its own top edge.
+    const hlRows = [...hl.querySelectorAll('.src-line')].map((el) => ({
+      n: Number(el.dataset.srcLine),
+      y: +(el.getBoundingClientRect().top - hlTop).toFixed(2),
+    }));
+
+    // Row tops in the textarea, measured with a mirror that copies its box.
+    const ct = getComputedStyle(ta);
+    const mirror = document.createElement('div');
+    for (const k of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'lineHeight',
+      'letterSpacing', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+      'borderTopWidth', 'borderLeftWidth', 'whiteSpace', 'wordBreak', 'overflowWrap',
+      'tabSize', 'boxSizing', 'textIndent', 'width']) mirror.style[k] = ct[k];
+    Object.assign(mirror.style, { position: 'absolute', top: '0', left: '0', visibility: 'hidden' });
+    document.body.appendChild(mirror);
+    const lines = ta.value.split('\n');
+    const taRows = [];
+    let acc = '';
+    for (let i = 0; i < lines.length; i++) {
+      acc += lines[i];
+      mirror.textContent = acc;
+      const marker = document.createElement('span');
+      marker.textContent = '\u200b';
+      mirror.appendChild(marker);
+      taRows.push({ n: i, y: +(marker.getBoundingClientRect().top - mirror.getBoundingClientRect().top).toFixed(2) });
+      mirror.removeChild(marker);
+      acc += '\n';
+    }
+    mirror.remove();
+    return { hlRows, taRows, lineHeight: parseFloat(getComputedStyle(ta).lineHeight) };
+  });
+
+  const hlMap = new Map(geo.hlRows.map((r) => [r.n, r.y]));
+  const taMap = new Map(geo.taRows.map((r) => [r.n, r.y]));
+  assert.equal(hlMap.size, taMap.size, `line counts differ: highlight ${hlMap.size}, textarea ${taMap.size}`);
+  // A dropped row shows up as a whole line-height of drift (~22px). Allow a
+  // quarter of a line for sub-pixel rounding: the two layers round their line
+  // heights independently, and the runner's font metrics differ from a desktop
+  // (CI measured 3.0px on a line that is correct, where a local run measured
+  // 2.0px). Anything approaching a full line is the real bug.
+  const tolerance = Math.max(4, (geo.lineHeight || 22) * 0.25);
+  for (const [n, taY] of taMap) {
+    assert.ok(hlMap.has(n), `highlight layer is missing source line ${n}`);
+    const drift = Math.abs(hlMap.get(n) - taY);
+    assert.ok(
+      drift <= tolerance,
+      `source line ${n} drifts ${drift.toFixed(1)}px between the layers ` +
+      `(highlight ${hlMap.get(n)}, textarea ${taY}, tolerance ${tolerance.toFixed(1)}) — blank lines are collapsing`
+    );
+  }
+
+  // Rows must also be the height of a line, not the height of the text inside
+  // them. An inline wrapper keeps the positions above correct for text lines
+  // but lets a blank row collapse, which is what put the painted glyphs on the
+  // wrong row in the first place. Measure the ROW PITCH instead of a single
+  // row's border box: a blank line holds only a newline, so its own box has no
+  // content height even when it occupies a full row — the distance to the next
+  // row is what proves it took up space.
+  const pitch = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#editorHl .src-line')]
+      .map((el) => ({ n: Number(el.dataset.srcLine), y: el.getBoundingClientRect().top,
+                      blank: el.textContent.trim() === '' }));
+    const gaps = [];
+    for (let i = 1; i < rows.length; i++) {
+      gaps.push({ after: rows[i - 1].n, blankBefore: rows[i - 1].blank,
+                  gap: +(rows[i].y - rows[i - 1].y).toFixed(2) });
+    }
+    return { gaps, lineHeight: parseFloat(getComputedStyle(document.querySelector('#editorHl')).lineHeight) };
+  });
+  assert.ok(pitch.gaps.length > 0, 'need at least two rows to measure row pitch');
+  for (const g of pitch.gaps) {
+    // Every row must advance by one line-height, whether or not it held text.
+    // Close enough to absorb sub-pixel rounding, far tighter than a dropped row
+    // (0px) or a doubled one (~2x).
+    assert.ok(
+      Math.abs(g.gap - pitch.lineHeight) <= 1,
+      `row pitch after source line ${g.after} is ${g.gap}px but the line-height is ` +
+      `${pitch.lineHeight.toFixed(2)}px${g.blankBefore ? ' (that row was blank)' : ''} — ` +
+      `rows are collapsing and the highlight will drift off the textarea's rows`
+    );
+  }
+});

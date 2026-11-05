@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.x
+
+### Fixed
+- Selected text in the edit pane is readable again. The failure had two independent halves, and fixing only the first is why an earlier attempt still looked broken:
+  1. **The selected run was painted transparent.** The pane's visible glyphs live in `.editor-hl`, *under* the textarea, and the textarea's own text is `transparent`. During selection the browser re-paints the selected run itself using `::selection`'s `color` — and that was `color: transparent` too, so nothing was drawn on top of the band at all.
+  2. **The band then covered the only glyphs on screen.** With a near-opaque `--accent-soft` rectangle painted over `.editor-hl`, a selected line read as blank.
+
+  Selection now uses two theme variables per scheme: `--sel-bg` (opaque enough to hide the highlight layer, so no doubled ghost text) and `--sel-fg` (the colour the browser paints the selected run in). Contrast is 10.1:1 in light and 7.9:1 in dark, well above the 4.5:1 body-text floor
+- The highlight layer no longer drops a row for every blank line. `pushSegment()` merges adjacent same-class segments, so a run of blank lines arrives as one `"\n\n\n"` segment, and `renderHighlight()` wrapped each *segment* in a `.src-line` instead of each *line* — every blank line therefore cost the overlay one row and every painted glyph sat one line above the row where the textarea drew the selection band. A ten-blank-line document drifted about 45 px. Each line now gets its own `.src-line` block, including blank ones, and an e2e test asserts that every source line starts on the same row in both layers
+
+### Added
+- Three-state colour scheme: 浅色 / 深色 / 跟随系统 (light / dark / follow system), replacing the single toggle. `跟随系统` re-reads `prefers-color-scheme`, so the page follows the OS live instead of deciding once at load. The choice is remembered per browser, `Ctrl+Shift+L` cycles the three states, and the top bar shows which one is active
+
 ## 2.0.0 — 2026-10-14
 
 ### Changed
