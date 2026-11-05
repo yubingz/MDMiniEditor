@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.x
+
+### Fixed
+- Selected text in the edit pane is readable again. The visible glyphs are painted by the highlight layer, which sits *under* the textarea; the textarea itself draws only a selection rectangle over them. Its `::selection` rule was `background: var(--accent-soft); color: transparent`, and `accent-soft` is a near-opaque wash, so the rectangle covered the glyph layer and a selected line went blank. The selection background is now a low-alpha accent whose contrast against the text underneath is floored at 45% in both schemes
+
+### Added
+- Three-state colour scheme: 浅色 / 深色 / 跟随系统 (light / dark / follow system), replacing the single toggle. `跟随系统` re-reads `prefers-color-scheme`, so the page follows the OS live instead of deciding once at load. The choice is remembered per browser, `Ctrl+Shift+L` cycles the three states, and the top bar shows which one is active
+
 ## 2.0.0 — 2026-10-14
 
 ### Changed

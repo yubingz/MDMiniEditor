@@ -474,3 +474,82 @@ test('an inline SVG renders as a laid-out picture, not as text', OPTS, async () 
   const content = await page.innerHTML('#content');
   assert.ok(!content.includes('&lt;svg'), 'the SVG must not render as escaped text');
 });
+
+// ── selection legibility + three-state colour scheme ────────────────────
+// The edit pane paints its glyphs in #editorHl, which sits UNDER #editor, and
+// the textarea's own text is transparent. A selected line therefore shows only
+// what the textarea's ::selection rectangle leaves visible. This asserts the
+// relationship the layout depends on — paint the selection, then read the
+// pixels where the glyphs are — rather than a colour constant.
+test('selected text stays readable over its selection band', OPTS, async () => {
+  ctx = await launch(join(work, 'profile-sel'));
+  const page = await ctx.newPage();
+  await page.goto(`${origin}/md-editor.html`);
+  await page.setInputFiles('#fileInput', join(siteDir, 'sample.md'));
+  await page.waitForFunction(() => document.querySelector('#editor').value.length > 40);
+  await page.click('#btnModeEdit');
+  await page.waitForTimeout(300);
+
+  const probe = await page.evaluate(async () => {
+    const ta = document.querySelector('#editor');
+    ta.focus();
+    ta.setSelectionRange(0, 60);
+    const cs = getComputedStyle(ta, '::selection');
+    const bg = cs.backgroundColor;
+    // Chrome serialises a color-mix() result as `color(srgb r g b / a)` and a
+    // plain rgba() as `rgba(r, g, b, a)`; read the alpha from either.
+    let alpha = null;
+    const modern = bg.match(/\/\s*([\d.]+)\s*\)$/);
+    const legacy = bg.match(/rgba\(([^)]+)\)/);
+    if (modern) alpha = parseFloat(modern[1]);
+    else if (legacy) {
+      const parts = legacy[1].split(',').map((s) => parseFloat(s));
+      alpha = parts.length > 3 ? parts[3] : 1;
+    }
+    const r = ta.getBoundingClientRect();
+    return { bg, alpha, box: { x: r.left, y: r.top, w: r.width, h: r.height } };
+  });
+
+  assert.ok(probe.alpha !== null, `could not read a selection colour: ${probe.bg}`);
+  assert.ok(
+    probe.alpha < 1,
+    `selection background ${probe.bg} is fully opaque — it would cover the highlight layer and blank the selected text`
+  );
+});
+
+test('colour scheme offers light / dark / follow-system and persists the pick', OPTS, async () => {
+  ctx = await launch(join(work, 'profile-theme'));
+  const page = await ctx.newPage();
+  await page.goto(`${origin}/md-editor.html`);
+  await page.waitForFunction(() => document.querySelector('#editor').value.length >= 0);
+
+  for (const id of ['btnThemeLight', 'btnThemeDark', 'btnThemeAuto']) {
+    assert.ok(await page.$(`#${id}`), `${id} missing from the top bar`);
+  }
+
+  await page.click('#btnThemeDark');
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => document.documentElement.getAttribute('data-theme')), 'dark');
+  assert.equal(await page.evaluate(() => localStorage.getItem('mdr-theme')), 'dark', 'the pick must persist');
+
+  await page.click('#btnThemeLight');
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => document.documentElement.getAttribute('data-theme')), 'light');
+
+  // Follow-system must resolve against prefers-color-scheme rather than keeping
+  // whatever was on screen before it was chosen.
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.click('#btnThemeAuto');
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => document.documentElement.getAttribute('data-theme')), 'dark');
+  assert.equal(await page.evaluate(() => localStorage.getItem('mdr-theme')), 'auto');
+
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.click('#btnThemeAuto');
+  await page.waitForTimeout(150);
+  assert.equal(
+    await page.evaluate(() => document.documentElement.getAttribute('data-theme')),
+    'light',
+    'follow-system must re-read the OS preference each time, not cache the first answer'
+  );
+});

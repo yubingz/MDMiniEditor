@@ -179,7 +179,8 @@
   }
   .size-cluster button + button { border-left: 1px solid var(--border); }
 
-  .mode-cluster {
+  .mode-cluster,
+  .theme-cluster {
     display: inline-flex;
     align-items: center;
     border: 1px solid var(--border);
@@ -187,18 +188,23 @@
     overflow: hidden;
     height: 32px;
   }
-  .mode-cluster button {
+  .mode-cluster button,
+  .theme-cluster button {
     height: 30px;
     border-radius: 0;
     padding: 0 9px;
     font-size: 12px;
   }
-  .mode-cluster button + button { border-left: 1px solid var(--border); }
-  .mode-cluster button[aria-pressed="true"] {
+  .theme-cluster button { padding: 0 10px; }
+  .mode-cluster button + button,
+  .theme-cluster button + button { border-left: 1px solid var(--border); }
+  .mode-cluster button[aria-pressed="true"],
+  .theme-cluster button[aria-pressed="true"] {
     background: var(--accent-soft);
     color: var(--accent);
   }
-  .mode-cluster button[aria-pressed="true"]:hover {
+  .mode-cluster button[aria-pressed="true"]:hover,
+  .theme-cluster button[aria-pressed="true"]:hover {
     background: var(--accent-soft);
     color: var(--accent);
   }
@@ -364,7 +370,16 @@
     caret-color: var(--ink);
     outline: none;
   }
-  .editor-ta::selection { background: var(--accent-soft); color: transparent; }
+  .editor-ta::selection {
+    /* WHY the old rule hid the text: the visible glyphs are painted by the
+       .editor-hl layer, which sits UNDER the textarea (absolute, earlier in DOM;
+       the textarea is position:relative and paints later). The old background
+       --accent-soft was OPAQUE, so the selection rectangle covered the
+       highlighted text and the selected run went blank. Any selection colour
+       here must carry alpha and let the text layer show through. */
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    color: transparent;
+  }
   /* Colour only: bold or italic would change the glyph advance and break the
      alignment with the transparent textarea. */
   .ts-head { color: var(--hl-head); }
@@ -781,7 +796,11 @@
       <button id="btnAxis" class="hide-sm" title="切换分栏方向 / Toggle split direction" hidden>上下 / Stacked</button>
       <button id="btnSave" title="保存到原文件 / Save to file (Ctrl+S)" disabled>保存 / Save</button>
       <button id="btnSaveAs" title="另存为 / Save As (Ctrl+Shift+S)" disabled>另存为 / Save As</button>
-      <button id="btnTheme" title="切换主题 / Theme (Ctrl+Shift+L)">主题 / Theme</button>
+      <div class="theme-cluster" role="group" aria-label="配色 / Color scheme">
+        <button id="btnThemeLight" title="浅色 / Light">浅色</button>
+        <button id="btnThemeDark" title="深色 / Dark">深色</button>
+        <button id="btnThemeAuto" title="跟随系统 / Auto (Ctrl+Shift+L 轮换)">自动</button>
+      </div>
       <button id="btnPrint" class="hide-sm" title="打印或导出 PDF / Print or export PDF">打印 / Print</button>
       <button id="btnRefresh" title="重新读取 / Refresh (F5)">刷新 / Refresh</button>
     </div>
@@ -1871,7 +1890,7 @@
   const dropCard = $('dropCard');
 
   const state = {
-    theme: localStorage.getItem('mdr-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
+    theme: normalizeTheme(localStorage.getItem('mdr-theme')),
     fontSize: Number(localStorage.getItem('mdr-font') || 16),
     showToc: localStorage.getItem('mdr-toc') !== '0',
     fileName: '',
@@ -1888,10 +1907,24 @@
   };
 
   function applyTheme() {
-    document.documentElement.setAttribute('data-theme', state.theme);
+    const resolved = resolveTheme(state.theme, matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.setAttribute('data-theme', resolved);
     localStorage.setItem('mdr-theme', state.theme);
-    $('btnTheme').textContent = state.theme === 'dark' ? '浅色 / Light' : '深色 / Dark';
+    $('btnThemeLight').setAttribute('aria-pressed', String(state.theme === 'light'));
+    $('btnThemeDark').setAttribute('aria-pressed', String(state.theme === 'dark'));
+    $('btnThemeAuto').setAttribute('aria-pressed', String(state.theme === 'auto'));
+    return resolved;
   }
+
+  // 'auto' must track the OS live, the same behaviour every mainstream editor
+  // ships. The listener only matters while the preference is 'auto' — a manual
+  // light/dark choice stays put no matter what the system does.
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
+    if (state.theme === 'auto') {
+      const resolved = applyTheme();
+      toast(resolved === 'dark' ? '跟随系统：深色 / Auto → dark' : '跟随系统：浅色 / Auto → light');
+    }
+  });
 
   function applyFont() {
     document.documentElement.style.setProperty('--body-size', state.fontSize + 'px');
@@ -2609,6 +2642,30 @@
 
   function normalizeMode(value) {
     return MODES.indexOf(value) >= 0 ? value : 'preview';
+  }
+
+  // Colour scheme preference, stored as-is ('light' | 'dark' | 'auto').
+  // 'auto' is the only state that reads the OS; a stored 'light'/'dark'
+  // outranks prefers-color-scheme forever after. Old builds stored 'dark'
+  // or 'light' directly, so unknown/absent values fall back to 'auto'.
+  // NOTE: kept literal (no const array) because state reads it at line
+  // ~1890, long before this block executes — a const here would still be in
+  // its temporal dead zone when normalizeTheme first runs.
+  function normalizeTheme(value) {
+    return value === 'light' || value === 'dark' || value === 'auto' ? value : 'auto';
+  }
+
+  // The preference resolves to what the page paints right now.
+  function resolveTheme(pref, systemDark) {
+    return normalizeTheme(pref) === 'auto' ? (systemDark ? 'dark' : 'light') : normalizeTheme(pref);
+  }
+
+  // Ctrl+Shift+L cycles the preference, not the resolved look: light -> dark
+  // -> auto -> light, so the keyboard path can reach every cluster button.
+  function nextTheme(pref) {
+    if (pref === 'light') return 'dark';
+    if (pref === 'dark') return 'auto';
+    return 'light';
   }
 
   function normalizeAxis(value) {
@@ -3447,11 +3504,17 @@
   window.addEventListener('resize', function () { growEditor(); });
 
   // Theme / font / toc / print
-  $('btnTheme').addEventListener('click', function () {
-    state.theme = state.theme === 'dark' ? 'light' : 'dark';
-    applyTheme();
-    toast(state.theme === 'dark' ? '已切换到深色 / Dark theme' : '已切换到浅色 / Light theme');
-  });
+  function setTheme(pref, announce) {
+    state.theme = normalizeTheme(pref);
+    const resolved = applyTheme();
+    if (announce) {
+      const names = { light: '浅色', dark: '深色', auto: '跟随系统' };
+      toast('配色：' + names[state.theme] + ' → 当前 ' + (resolved === 'dark' ? '深色' : '浅色'));
+    }
+  }
+  $('btnThemeLight').addEventListener('click', function () { setTheme('light', true); });
+  $('btnThemeDark').addEventListener('click', function () { setTheme('dark', true); });
+  $('btnThemeAuto').addEventListener('click', function () { setTheme('auto', true); });
   $('btnFontUp').addEventListener('click', function () {
     state.fontSize = Math.min(22, state.fontSize + 1);
     applyFont();
@@ -3497,7 +3560,7 @@
     }
     if (mod && e.shiftKey && e.key.toLowerCase() === 'l') {
       e.preventDefault();
-      $('btnTheme').click();
+      setTheme(nextTheme(state.theme), true);
     }
     if (mod && e.key === '=' ) {
       e.preventDefault();
