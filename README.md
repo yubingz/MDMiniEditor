@@ -107,7 +107,9 @@ Inline SVG (a fenced ```svg block, or a pasted `<svg>` block):
 | --- | --- |
 | `md-editor.html` | Main reader |
 | `Open-Editor.bat` | Launch the reader; asks for a `.md` when double-clicked |
-| `Open-MD-File.bat` | Open a `.md` file via drag-and-drop, command line or file association |
+| `Open-MD-File.bat` | Open a `.md` file via drag-and-drop or the command line (use `open-md-launch.ps1` for associations) |
+| `open-md-launch.ps1` | **File-association entry point**: never goes through cmd's parser, so `)` in a path is safe |
+| `install-file-association.ps1` | Writes the `.md` association to the registry (one manual confirmation still needed) |
 | `open-md.ps1` | Builds the reading page and launches the browser; used by both launchers |
 | `katex/` | Bundled KaTeX 0.16.11 (JS, CSS, fonts) that the launcher inlines so formulas render offline. MIT-licensed; not needed for editing the reader |
 | `.gitattributes` | Pins `*.html` and the launcher scripts to CRLF and normalises every other file |
@@ -124,11 +126,32 @@ Inline SVG (a fenced ```svg block, or a pasted `<svg>` block):
 
 Windows 10/11:
 
-1. Right-click a `.md` file → **Open with** → **Choose another app**.
-2. Enable **Always use this app**, then browse and select `Open-MD-File.bat` (or a shortcut to it).
-3. If `.bat` cannot be selected on your build, keep using drag-and-drop onto `Open-MD-File.bat`.
+1. Right-click `install-file-association.ps1` → **Run with PowerShell** to write the launch command
+   into the registry.
+2. Right-click any `.md` file → **Open with** → **Choose another app** → enable
+   **Always use this app**, then browse and select `open-md-launch.ps1`.
+3. Double-clicking a `.md` now opens it in the reader.
 
-> Association support depends on Windows version; drag-and-drop always works.
+> **Why the association points at a `.ps1`, not the `.bat`**: when the `.md` association is written
+> as `something.bat "%1"`, `cmd.exe` fails to parse the command *before* the batch file ever runs —
+> a `)` in the path is read as block syntax (it reports `was unexpected at this time`), so the
+> batch file never executes and the console window just flashes and closes.
+> `open-md-launch.ps1` calls PowerShell directly and never goes through cmd's parser.
+>
+> Step 2 cannot be scripted: Windows hash-protects `UserChoice`, so the user must confirm it once in
+> the UI. If double-clicking still reaches the old handler, reset `.md` under
+> **Settings → Apps → Default apps**.
+
+### Troubleshooting: double-click does nothing
+
+`Open-MD-File.bat`, `open-md-launch.ps1` and `open-md.ps1` all append to one shared log:
+
+```powershell
+Get-Content $env:TEMP\mdminieditor-open.log -Tail 40 -Encoding UTF8
+```
+
+Each launch records the argument, the exit code, and `OPENED:` / `OPEN FAILED:` with the reason —
+the console window closes immediately, so this is the only place a failure is visible.
 
 ---
 
