@@ -104,8 +104,10 @@ $$
 | --- | --- |
 | `md-editor.html` | 主阅读器 |
 | `Open-Editor.bat` | 启动阅读器；双击时弹出文件选择框 |
-| `Open-MD-File.bat` | 通过拖拽、命令行或文件关联打开 `.md` |
-| `open-md.ps1` | 生成阅读页面并调用浏览器，两个启动器共用 |
+| `Open-MD-File.bat` | 通过拖拽或命令行打开 `.md`（文件关联请用下面的 `open-md-launch.ps1`） |
+| `open-md-launch.ps1` | **文件关联的入口**：不经 cmd 解析，路径含括号也不会挂 |
+| `open-md.ps1` | 生成阅读页面并调用浏览器，三个启动器共用 |
+| `install-file-association.ps1` | 把 `.md` 关联写进注册表（之后仍需手动确认一次） |
 | `katex/` | 随包分发的 KaTeX 0.16.11（JS、CSS、字体），启动器把它内联进页面，公式离线也能排版。MIT 许可，改阅读器时用不到 |
 | `.gitattributes` | 保证 `*.html` 与启动脚本为 CRLF，其余文件正常归一化 |
 | `.gitignore` | 把本地构建、日志与编辑器临时文件挡在仓库外 |
@@ -121,11 +123,29 @@ $$
 
 Windows 10/11：
 
-1. 右键 `.md` 文件 →「打开方式」→「选择其他应用」
-2. 勾选「始终使用此应用」，浏览并选择 `Open-MD-File.bat`（或其快捷方式）
-3. 若当前系统无法直接选择 `.bat`，可继续用拖到 `Open-MD-File.bat` 的方式
+1. 右键本目录下的 `install-file-association.ps1` →「使用 PowerShell 运行」，把启动命令写进注册表
+2. 右键任意 `.md` 文件 →「打开方式」→「选择其他应用」→ 勾选「始终使用此应用」，
+   浏览并选择 `open-md-launch.ps1`
+3. 双击 `.md` 即可在阅读器中打开
 
-> 能否关联 `.bat` 与 Windows 版本有关；拖拽方式始终可用。
+> **为什么关联的是 `.ps1` 而不是 `.bat`**：把 `.md` 关联写成 `something.bat "%1"` 时，
+> `cmd.exe` 会在调用 bat **之前**就解析失败——路径里的 `)` 会被当成块语法
+> （报 `was unexpected at this time`），bat 从不执行，双击的窗口一闪而过。
+> `open-md-launch.ps1` 走 PowerShell 直接调用，不经过 cmd 的解析。
+>
+> 第 2 步无法脚本代劳：Windows 对 `UserChoice` 有哈希保护，只能由用户在界面上确认一次。
+> 若双击后仍走旧的处理程序，到「设置 → 应用 → 默认应用」按文件类型重置一次 `.md`。
+
+### 排查：双击没反应
+
+`Open-MD-File.bat`、`open-md-launch.ps1` 与 `open-md.ps1` 共用一份日志：
+
+```powershell
+Get-Content $env:TEMP\mdminieditor-open.log -Tail 40 -Encoding UTF8
+```
+
+每次启动记录参数、退出码，以及 `OPENED:` / `OPEN FAILED:` 及原因——双击的窗口会立刻关闭，
+这是唯一能看到失败原因的途径。
 
 ---
 

@@ -27,7 +27,13 @@ const scripts = readdirSync(ROOT)
 const readBytes = (name) => readFileSync(join(ROOT, name), 'latin1');
 
 test('every Windows launcher script is covered', () => {
-  assert.deepEqual(scripts, ['Open-Editor.bat', 'Open-MD-File.bat', 'open-md.ps1']);
+  assert.deepEqual(scripts, [
+    'Open-Editor.bat',
+    'Open-MD-File.bat',
+    'install-file-association.ps1',
+    'open-md-launch.ps1',
+    'open-md.ps1',
+  ]);
 });
 
 for (const script of scripts) {

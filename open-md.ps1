@@ -1,4 +1,4 @@
-<#
+﻿<#
     open-md.ps1 — build a reading page for a Markdown file and open it in the reader.
 
     The two Windows launchers differ only in how they get a path:
@@ -20,8 +20,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Diagnostics: a double-click launch closes its console immediately, so a failure is invisible.
+# Every launcher funnels through this file, which is therefore the one place that owns the log —
+# the .bat stays free of %TEMP% (test/launcher-hygiene.test.mjs pins that), and the association
+# entry point (open-md-launch.ps1) only forwards here.
+# / 双击启动时窗口立刻关闭，失败无从察觉。所有入口都经过本文件，故日志在此统一记录。
+$script:LaunchLog = Join-Path $env:TEMP 'mdminieditor-open.log'
+function Write-LaunchLog([string]$msg) {
+    try { Add-Content -LiteralPath $script:LaunchLog -Value $msg -Encoding UTF8 } catch { }
+}
+
+
 if (-not $Reader) { $Reader = Join-Path $PSScriptRoot 'md-editor.html' }
 if (-not (Test-Path -LiteralPath $Reader)) { throw "Reader not found: $Reader" }
+
+Write-LaunchLog ("[{0}] start  arg=`"{1}`"" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $MdPath)
 
 function ConvertTo-JsLiteral([string]$Value) {
     ($Value | ConvertTo-Json -Compress).Replace('</', '<\/')
@@ -193,4 +206,18 @@ if (-not $Out) {
 [IO.File]::WriteAllText($Out, $html.Substring(0, $idx) + $preload + $html.Substring($idx), [Text.UTF8Encoding]::new($false))
 
 # ShellExecute = whatever handler the user registered for .html. That IS the default browser.
-Start-Process $Out
+# Log the outcome: a double-click launch closes the console, so a silent failure here looks
+# exactly like "the window flashed and nothing happened". / 记录打开结果，否则失败时无从察觉。
+try {
+    Start-Process $Out -ErrorAction Stop
+    Write-LaunchLog "  OPENED: $Out"
+    Write-Output "OPENED: $Out"
+} catch {
+    Write-LaunchLog "  OPEN FAILED: $Out"
+    Write-LaunchLog ("  REASON: " + $_.Exception.Message)
+    Write-LaunchLog ("  HTML ASSOC: " + (cmd /c assoc .html 2>&1))
+    Write-Output "OPEN FAILED: $Out"
+    Write-Output ("REASON: " + $_.Exception.Message)
+    Write-Error $_.Exception.Message
+    exit 1
+}
